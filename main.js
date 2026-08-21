@@ -116,29 +116,12 @@ function buildField() {
 }
 buildField();
 
-// ---------- สนามอลังการแบบ procedural (อัฒจันทร์ + คนดู + ไฟ + ป้าย) ----------
-// เบามาก: ไม่กี่ mesh + crowd texture ที่แชร์กัน ล้อมรอบสนามแข่ง ±22/±14
-// วางไว้นอกเส้นสนาม จึงไม่ชนกับ gameplay หรือประตู
-function makeCrowdTexture() {
-  const cv = document.createElement('canvas');
-  cv.width = 256; cv.height = 128;
-  const ctx = cv.getContext('2d');
-  ctx.fillStyle = '#1a2233'; ctx.fillRect(0, 0, cv.width, cv.height);   // เก้าอี้มืด ๆ
-  // จุดสีสุ่ม = หัวคนดู
-  for (let i = 0; i < 1400; i++) {
-    ctx.fillStyle = `hsl(${Math.floor(Math.random() * 360)}, ${40 + Math.random() * 45 | 0}%, ${45 + Math.random() * 30 | 0}%)`;
-    const x = Math.random() * cv.width, y = Math.random() * cv.height, r = 1.4 + Math.random() * 1.6;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-  }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  return tex;
-}
-
+// ---------- สนามอลังการแบบ procedural (อัฒจันทร์เปล่า + ไฟ + ป้าย) ----------
+// เบามาก: ไม่กี่ mesh ล้อมรอบสนามแข่ง ±22/±14 นอกเส้นสนาม
+// จึงไม่ชนกับ gameplay หรือประตู
 function buildStadiumDecor() {
   const { halfX, halfZ } = CONFIG.field;
   const grp = new THREE.Group();
-  const crowd = makeCrowdTexture();
 
   // ป้ายโฆษณารอบสนาม (กำแพงเตี้ยสีสด นอกเส้นเล็กน้อย)
   const boardH = 0.9, gap = 1.6;
@@ -157,12 +140,10 @@ function buildStadiumDecor() {
 
   // อัฒจันทร์ลาดเอียงมีคนดู 4 ด้าน
   const standDepth = 26, standH = 16, setback = 5;
+  const standMat = new THREE.MeshStandardMaterial({ color: 0x2a3550, roughness: 1, side: THREE.DoubleSide });
   const addStand = (len, cx, cz, ry) => {
     const geo = new THREE.PlaneGeometry(len, Math.hypot(standDepth, standH));
-    const tex = crowd.clone(); tex.needsUpdate = true;
-    tex.repeat.set(Math.max(2, len / 6), 6);
-    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 1, side: THREE.DoubleSide });
-    const m = new THREE.Mesh(geo, mat);
+    const m = new THREE.Mesh(geo, standMat);
     // เอียงขึ้นจากขอบสนามไปด้านหลัง
     const slope = Math.atan2(standH, standDepth);
     m.position.set(cx, standH / 2, cz);
@@ -552,7 +533,7 @@ const ball = {
 // ลูกฟุตบอลลายขาว-ดำแบบ procedural (ไม่ต้องพึ่ง texture)
 // ใช้ทรงอิโคซาฮีดรอน แล้วทาสีดำที่หน้าใกล้ 12 มุม (เป็นห้าเหลี่ยม) ที่เหลือขาว
 function buildSoccerBall(radius) {
-  const geo = new THREE.IcosahedronGeometry(radius, 1);
+  const geo = new THREE.IcosahedronGeometry(radius, 5);   // ละเอียดขึ้น → กลม ไม่เหลี่ยม
   geo.computeVertexNormals();
   const t = (1 + Math.sqrt(5)) / 2;
   const verts = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t],

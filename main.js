@@ -26,15 +26,6 @@ const CONFIG = {
   ball:       {
     radius: 0.55, gravity: 20, bounce: 0.55, friction: 0.985, airDrag: 0.995,
   },
-  // สนามจากโมเดล football_stade.glb — ปุ่มปรับให้พอดีกับประตู (โกล hitblock อยู่ที่ ±22)
-  // ปรับสด ๆ ได้จากคอนโซล: __debug.retuneStadium({ scale: 0.5, rotY: 1.57, y: 0, hideGrass: true })
-  stadium:    {
-    enabled: false,   // เปิดเมื่อ deploy ไฟล์ football_stade.glb (75MB) ขึ้นเว็บแล้ว
-    scale: 0.42,      // ย่อ/ขยายทั้งสนาม
-    rotY: 0,          // หมุนรอบแกนตั้ง (เรเดียน) — ถ้าประตูอยู่ผิดด้านใส่ 1.5708
-    y: 0,             // ยก/กดสนามขึ้นลง
-    hideGrass: false, // true = ซ่อนหญ้า+เส้น procedural เดิม (ใช้พื้นจากโมเดลแทน)
-  },
   matchSeconds: 120,
 };
 
@@ -72,18 +63,6 @@ scene.add(sun);
 function buildField() {
   const group = new THREE.Group();
   const { halfX, halfZ } = CONFIG.field;
-
-  // ถ้าใช้พื้นจากโมเดลสนาม ก็ข้ามหญ้า/เส้น procedural เดิม
-  if (CONFIG.stadium.enabled && CONFIG.stadium.hideGrass) {
-    const margin = new THREE.Mesh(
-      new THREE.PlaneGeometry(400, 400),
-      new THREE.MeshStandardMaterial({ color: 0x2c7a3d, roughness: 1 })
-    );
-    margin.rotation.x = -Math.PI / 2; margin.position.y = -0.05; margin.receiveShadow = true;
-    group.add(margin);
-    scene.add(group);
-    return;
-  }
 
   // Striped grass
   const stripes = 10;
@@ -137,34 +116,92 @@ function buildField() {
 }
 buildField();
 
-// ---------- สนามจากโมเดล (football_stade.glb) ----------
-let stadiumRoot = null;
-async function loadStadium() {
-  const S = CONFIG.stadium;
-  if (!S.enabled) return;
-  try {
-    const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
-    const gltf = await new GLTFLoader().loadAsync('./assets/football_stade.glb');
-    const m = gltf.scene;
-    m.scale.setScalar(S.scale);
-    m.rotation.y = S.rotY;
-    m.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(m);
-    m.position.y = -box.min.y + S.y;   // วางให้พื้นสนามแตะระดับ 0
-    m.traverse((o) => { if (o.isMesh) { o.receiveShadow = true; o.frustumCulled = false; } });
-    stadiumRoot = m;
-    scene.add(m);
-  } catch (e) {
-    console.warn('โหลดสนาม football_stade.glb ไม่ได้', e);
+// ---------- สนามอลังการแบบ procedural (อัฒจันทร์ + คนดู + ไฟ + ป้าย) ----------
+// เบามาก: ไม่กี่ mesh + crowd texture ที่แชร์กัน ล้อมรอบสนามแข่ง ±22/±14
+// วางไว้นอกเส้นสนาม จึงไม่ชนกับ gameplay หรือประตู
+function makeCrowdTexture() {
+  const cv = document.createElement('canvas');
+  cv.width = 256; cv.height = 128;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#1a2233'; ctx.fillRect(0, 0, cv.width, cv.height);   // เก้าอี้มืด ๆ
+  // จุดสีสุ่ม = หัวคนดู
+  for (let i = 0; i < 1400; i++) {
+    ctx.fillStyle = `hsl(${Math.floor(Math.random() * 360)}, ${40 + Math.random() * 45 | 0}%, ${45 + Math.random() * 30 | 0}%)`;
+    const x = Math.random() * cv.width, y = Math.random() * cv.height, r = 1.4 + Math.random() * 1.6;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
   }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
 }
-// ปรับสนามสด ๆ จากคอนโซลแล้วโหลดใหม่ทันที
-function retuneStadium(opts = {}) {
-  Object.assign(CONFIG.stadium, opts);
-  if (stadiumRoot) { scene.remove(stadiumRoot); stadiumRoot = null; }
-  return loadStadium();
+
+function buildStadiumDecor() {
+  const { halfX, halfZ } = CONFIG.field;
+  const grp = new THREE.Group();
+  const crowd = makeCrowdTexture();
+
+  // ป้ายโฆษณารอบสนาม (กำแพงเตี้ยสีสด นอกเส้นเล็กน้อย)
+  const boardH = 0.9, gap = 1.6;
+  const boardCols = [0xffd166, 0xef476f, 0x06d6a0, 0x118ab2, 0xf78c6b];
+  const addBoard = (w, x, z, ry) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, boardH),
+      new THREE.MeshStandardMaterial({ color: boardCols[(Math.abs(x + z) | 0) % boardCols.length], roughness: 0.8, side: THREE.DoubleSide })
+    );
+    m.position.set(x, boardH / 2, z); m.rotation.y = ry; grp.add(m);
+  };
+  addBoard(halfX * 2, 0, -halfZ - gap, 0);
+  addBoard(halfX * 2, 0, halfZ + gap, 0);
+  addBoard(halfZ * 2, -halfX - gap, 0, Math.PI / 2);
+  addBoard(halfZ * 2, halfX + gap, 0, Math.PI / 2);
+
+  // อัฒจันทร์ลาดเอียงมีคนดู 4 ด้าน
+  const standDepth = 26, standH = 16, setback = 5;
+  const addStand = (len, cx, cz, ry) => {
+    const geo = new THREE.PlaneGeometry(len, Math.hypot(standDepth, standH));
+    const tex = crowd.clone(); tex.needsUpdate = true;
+    tex.repeat.set(Math.max(2, len / 6), 6);
+    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 1, side: THREE.DoubleSide });
+    const m = new THREE.Mesh(geo, mat);
+    // เอียงขึ้นจากขอบสนามไปด้านหลัง
+    const slope = Math.atan2(standH, standDepth);
+    m.position.set(cx, standH / 2, cz);
+    m.rotation.order = 'YXZ';
+    m.rotation.y = ry;
+    m.rotation.x = -(Math.PI / 2 - slope);
+    grp.add(m);
+  };
+  const outZ = halfZ + gap + setback, outX = halfX + gap + setback;
+  addStand(halfX * 2 + 20, 0, -outZ - standDepth / 2 * Math.cos(Math.atan2(standH, standDepth)), 0);
+  addStand(halfX * 2 + 20, 0, outZ + standDepth / 2 * Math.cos(Math.atan2(standH, standDepth)), Math.PI);
+  addStand(halfZ * 2 + 20, -outX - standDepth / 2 * Math.cos(Math.atan2(standH, standDepth)), 0, Math.PI / 2);
+  addStand(halfZ * 2 + 20, outX + standDepth / 2 * Math.cos(Math.atan2(standH, standDepth)), 0, -Math.PI / 2);
+
+  // เสาไฟสปอตไลต์ 4 มุม (เสา + แผงไฟเรืองแสง)
+  const poleMat = new THREE.MeshStandardMaterial({ color: 0x8892a0, roughness: 0.6, metalness: 0.3 });
+  const lampMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff2c4, emissiveIntensity: 1.4, roughness: 0.4 });
+  const towerH = 26;
+  [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([sx, sz]) => {
+    const px = sx * (halfX + gap + 3), pz = sz * (halfZ + gap + 3);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, towerH, 10), poleMat);
+    pole.position.set(px, towerH / 2, pz); pole.castShadow = true; grp.add(pole);
+    const rig = new THREE.Mesh(new THREE.BoxGeometry(4.2, 2.4, 0.5), poleMat);
+    rig.position.set(px, towerH, pz); rig.lookAt(0, 6, 0); grp.add(rig);
+    // แผงไฟ 2x4 ดวง หันเข้าสนาม
+    for (let a = 0; a < 8; a++) {
+      const lamp = new THREE.Mesh(new THREE.CircleGeometry(0.45, 12), lampMat);
+      lamp.position.set(px + (a % 4 - 1.5) * 1.0 * -sx, towerH + (a < 4 ? 0.6 : -0.6), pz);
+      lamp.lookAt(0, 6, 0);
+      grp.add(lamp);
+    }
+    // แสงจริงจากมุมสนาม (นุ่ม ๆ ไม่เปิดเงาเพื่อประหยัด)
+    const dl = new THREE.PointLight(0xfff4d6, 0.35, 130, 1.6);
+    dl.position.set(px, towerH, pz); grp.add(dl);
+  });
+
+  scene.add(grp);
 }
-loadStadium();
+buildStadiumDecor();
 
 // ============================================================
 // Goals (two of them, at ±halfX). Returns their world bounds.
@@ -1729,7 +1766,7 @@ window.__debug = {
   ball, ronaldo, state, settings, goals, CONFIG, FISH_ROSTER, TEAMS,
   stepFish, stepRonaldo, stepBall, collideFishBall, doFlop, onGoal,
   resetBall, resetPlayers, resetRonaldo, startMatch, setFish, spawnPlayers,
-  showScreen, toggleFullscreen, buildLobby, retuneStadium, get stadiumRoot() { return stadiumRoot; },
+  showScreen, toggleFullscreen, buildLobby,
   playBreath, get breathCount() { return breathBuffers.filter(Boolean).length; },
   renderer, scene, camera, animateFish, animateHuman, updateCamera,
 };

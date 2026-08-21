@@ -10,7 +10,7 @@ import { net, netAvailable, connectRoom, claimSlot, leaveRoom, updateMeta, onPla
 // ---------- Tunables (tweak the feel here) ----------
 const CONFIG = {
   field:      { halfX: 22, halfZ: 14 },      // playing area half-extents
-  goal:       { width: 7, height: 3.2, depth: 1.4 },
+  goal:       { width: 7, height: 3.2, depth: 2.8 },
   flop:       {
     forward:  7.2,   // forward impulse per flop
     up:       6.0,   // vertical hop
@@ -286,52 +286,69 @@ buildCrowd();
 // Goals (two of them, at ±halfX). Returns their world bounds.
 // ============================================================
 const goals = [];
+// ตะข่ายแบบ texture (เส้นขาวบนพื้นโปร่ง) ไว้ทาแผงตาข่าย
+function makeNetTexture() {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = 3;
+  for (let i = 0; i <= 64; i += 8) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 64); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(64, i); ctx.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
 function buildGoals() {
   const { halfX } = CONFIG.field;
   const { width, height, depth } = CONFIG.goal;
   const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.1 });
-  const netMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.18, side: THREE.DoubleSide, roughness: 1,
-  });
+  const netTex = makeNetTexture();
+  const half = width / 2, postR = 0.13;
+  // แผงตาข่าย: โคลน texture แล้วปรับ repeat ให้ช่องตาข่ายเท่ากันทุกแผง (~0.55/ช่อง)
+  const netPanel = (w, h) => {
+    const t = netTex.clone(); t.needsUpdate = true;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(Math.max(1, w / 0.55), Math.max(1, h / 0.55));
+    return new THREE.MeshBasicMaterial({ map: t, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false });
+  };
 
   [-1, 1].forEach((side) => {
     const g = new THREE.Group();
-    const x = side * (halfX + 0.1);
-    const postR = 0.14;
-    const half = width / 2;
+    const xf = side * (halfX + 0.1);   // เส้นประตู (หน้า)
+    const xb = xf + side * depth;       // หลังประตู
+    const xm = (xf + xb) / 2;
 
     const post = (px, pz, h) => {
       const m = new THREE.Mesh(new THREE.CylinderGeometry(postR, postR, h, 12), postMat);
-      m.position.set(px, h / 2, pz);
-      m.castShadow = true;
-      g.add(m);
+      m.position.set(px, h / 2, pz); m.castShadow = true; g.add(m);
     };
-    // Two uprights + crossbar
-    post(x, -half, height);
-    post(x, half, height);
-    const bar = new THREE.Mesh(new THREE.CylinderGeometry(postR, postR, width, 12), postMat);
-    bar.rotation.x = Math.PI / 2;
-    bar.position.set(x, height, 0);
-    bar.castShadow = true;
-    g.add(bar);
+    const crossbar = (px) => {
+      const bar = new THREE.Mesh(new THREE.CylinderGeometry(postR, postR, width, 12), postMat);
+      bar.rotation.x = Math.PI / 2; bar.position.set(px, height, 0); bar.castShadow = true; g.add(bar);
+    };
+    // โครงหน้า + หลัง (เสา 4 ต้น + คาน 2 อัน)
+    post(xf, -half, height); post(xf, half, height); crossbar(xf);
+    post(xb, -half, height); post(xb, half, height); crossbar(xb);
+    // ราวบนเชื่อมหน้า-หลัง 2 ข้าง
+    [-half, half].forEach((pz) => {
+      const r = new THREE.Mesh(new THREE.CylinderGeometry(postR * 0.8, postR * 0.8, depth, 10), postMat);
+      r.rotation.z = Math.PI / 2; r.position.set(xm, height, pz); g.add(r);
+    });
 
-    // Net (back + roof + sides) pushed outward by `depth`
-    const back = new THREE.Mesh(new THREE.PlaneGeometry(width, height), netMat);
-    back.position.set(x + side * depth, height / 2, 0);
-    back.rotation.y = Math.PI / 2;
-    g.add(back);
+    // ตาข่าย 4 แผง: หลัง / หลังคา / 2 ข้าง
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(width, height), netPanel(width, height));
+    back.position.set(xb, height / 2, 0); back.rotation.y = Math.PI / 2; g.add(back);
+    const roof = new THREE.Mesh(new THREE.PlaneGeometry(depth, width), netPanel(depth, width));
+    roof.rotation.x = -Math.PI / 2; roof.position.set(xm, height, 0); g.add(roof);
+    [-half, half].forEach((pz) => {
+      const sn = new THREE.Mesh(new THREE.PlaneGeometry(depth, height), netPanel(depth, height));
+      sn.position.set(xm, height / 2, pz); g.add(sn);
+    });
 
     scene.add(g);
 
-    // Scoring volume: ball crossing the goal line within the mouth
-    goals.push({
-      side,
-      lineX: x,
-      minZ: -half + 0.2,
-      maxZ: half - 0.2,
-      maxY: height - 0.2,
-      outerX: x + side * (depth + 0.6),
-    });
+    // ขอบเขตประตู (ใช้ตอนตรวจบอลเข้า + ตาข่ายรับบอล)
+    goals.push({ side, lineX: xf, backX: xb, half, height });
   });
 }
 buildGoals();
@@ -1341,30 +1358,45 @@ function stepBall(dt) {
     if (Math.abs(ball.vel.y) < 0.3) ball.vel.y = 0;
   }
 
-  // Goal detection BEFORE clamping walls
-  if (state.goalCooldown <= 0) {
-    for (const g of goals) {
-      const crossed = g.side > 0 ? ball.pos.x > g.lineX : ball.pos.x < g.lineX;
-      if (crossed &&
-          ball.pos.z > g.minZ && ball.pos.z < g.maxZ &&
-          ball.pos.y < g.maxY) {
-        onGoal(g.side);
-        return;
-      }
-    }
+  // --- ประตู + ตาข่าย: ปล่อยบอลลอดปากประตูเข้าไป ตาข่ายรับไว้ นับแต้มเมื่อเข้าไปข้างใน ---
+  const bx = CONFIG.field.halfX, bz = CONFIG.field.halfZ;
+  const gm = CONFIG.goal;
+  let inAnyGoal = false;
+  for (const g of goals) {
+    const reachedLine = g.side > 0 ? ball.pos.x > g.lineX : ball.pos.x < g.lineX;
+    const inMouthZ = Math.abs(ball.pos.z) < g.half;
+    if (!reachedLine || !inMouthZ || ball.pos.y > g.height) continue;
+    inAnyGoal = true;
+
+    // นับแต้มเมื่อบอลเข้าไปในประตูชัด ๆ (พ้นเส้นเข้าไป ~0.5)
+    const deepInside = g.side > 0 ? ball.pos.x > g.lineX + 0.5 : ball.pos.x < g.lineX - 0.5;
+    if (deepInside && state.goalCooldown <= 0) onGoal(g.side);
+
+    // ตาข่ายหลัง — หยุดบอลไม่ให้ทะลุ
+    if (g.side > 0) { if (ball.pos.x > g.backX - B.radius) { ball.pos.x = g.backX - B.radius; ball.vel.x = -Math.abs(ball.vel.x) * 0.25; } }
+    else            { if (ball.pos.x < g.backX + B.radius) { ball.pos.x = g.backX + B.radius; ball.vel.x = Math.abs(ball.vel.x) * 0.25; } }
+    // ตาข่ายข้าง
+    const hw = g.half - B.radius;
+    if (ball.pos.z > hw)  { ball.pos.z = hw;  ball.vel.z = -Math.abs(ball.vel.z) * 0.3; }
+    if (ball.pos.z < -hw) { ball.pos.z = -hw; ball.vel.z = Math.abs(ball.vel.z) * 0.3; }
+    // หลังคาตาข่าย
+    if (ball.pos.y > g.height - B.radius) { ball.pos.y = g.height - B.radius; ball.vel.y = -Math.abs(ball.vel.y) * 0.3; }
+    // แรงหน่วงในตาข่าย → บอลค้างอยู่ในประตู
+    ball.vel.x *= 0.9; ball.vel.z *= 0.9;
   }
 
-  // Walls (bounce), but let the ball pass through the goal mouth
-  const bx = CONFIG.field.halfX, bz = CONFIG.field.halfZ;
-  const inGoalMouth = Math.abs(ball.pos.z) < CONFIG.goal.width / 2 - 0.2;
-  if (!inGoalMouth) {
-    if (ball.pos.x < -bx + B.radius) { ball.pos.x = -bx + B.radius; ball.vel.x = Math.abs(ball.vel.x) * B.bounce; }
-    if (ball.pos.x > bx - B.radius)  { ball.pos.x = bx - B.radius;  ball.vel.x = -Math.abs(ball.vel.x) * B.bounce; }
-  } else {
-    // Behind the goal: stop it eventually
-    const outX = CONFIG.field.halfX + CONFIG.goal.depth + 0.6;
-    if (ball.pos.x < -outX) { ball.pos.x = -outX; ball.vel.x = 0; }
-    if (ball.pos.x > outX)  { ball.pos.x = outX;  ball.vel.x = 0; }
+  // กำแพงด้าน x — เด้ง เว้นแต่กำลังลอดปากประตู (ปล่อยเข้า)
+  if (!inAnyGoal) {
+    const inMouthZ = Math.abs(ball.pos.z) < gm.width / 2;
+    if (!inMouthZ) {
+      if (ball.pos.x < -bx + B.radius) { ball.pos.x = -bx + B.radius; ball.vel.x = Math.abs(ball.vel.x) * B.bounce; }
+      if (ball.pos.x > bx - B.radius)  { ball.pos.x = bx - B.radius;  ball.vel.x = -Math.abs(ball.vel.x) * B.bounce; }
+    } else {
+      // ลอยข้ามคาน/พลาดออกหลังสนาม → กันไม่ให้หลุดไปไกล
+      const outX = bx + gm.depth + 1;
+      if (ball.pos.x < -outX) { ball.pos.x = -outX; ball.vel.x = 0; }
+      if (ball.pos.x > outX)  { ball.pos.x = outX;  ball.vel.x = 0; }
+    }
   }
   if (ball.pos.z < -bz + B.radius) { ball.pos.z = -bz + B.radius; ball.vel.z = Math.abs(ball.vel.z) * B.bounce; }
   if (ball.pos.z > bz - B.radius)  { ball.pos.z = bz - B.radius;  ball.vel.z = -Math.abs(ball.vel.z) * B.bounce; }

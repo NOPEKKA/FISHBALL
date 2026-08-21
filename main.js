@@ -184,6 +184,61 @@ function buildStadiumDecor() {
 }
 buildStadiumDecor();
 
+// ---------- คนดูจริงในอัฒจันทร์ (โมเดลดัง ๆ สุ่มวางจนเกือบเต็ม) ----------
+const CROWD_FILES = ['charlie_kirk', 'trump', 'obama', 'kanye', 'hitler', 'spiderman', 'batman', 'tungtung'];
+async function buildCrowd() {
+  const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+  const loader = new GLTFLoader();
+  const protos = [];
+  await Promise.all(CROWD_FILES.map(async (name) => {
+    try {
+      const g = await loader.loadAsync(`./assets/crowd/${name}.glb`);
+      const s = g.scene;
+      s.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(s);
+      const size = new THREE.Vector3(); box.getSize(size);
+      const targetH = 2.2;                      // ปรับสูงทุกตัวให้เท่ากัน ~2.2 หน่วย
+      const sc = targetH / (size.y || 1);
+      s.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = true; } });
+      protos.push({ obj: s, sc, minY: box.min.y });
+    } catch (e) { console.warn('โหลดคนดูไม่ได้:', name, e); }
+  }));
+  if (!protos.length) return;
+
+  const grp = new THREE.Group();
+  const { halfX, halfZ } = CONFIG.field;
+  const place = (x, y, z) => {
+    const p = protos[Math.floor(Math.random() * protos.length)];
+    const o = p.obj.clone(true);               // clone แชร์ geometry/material → เบาหน่วย
+    o.scale.setScalar(p.sc);
+    o.position.set(x, y - p.minY * p.sc, z);   // เท้าแตะระดับชั้น
+    o.rotation.y = Math.atan2(-x, -z) + (Math.random() - 0.5) * 0.4;  // หันเข้าสนาม
+    grp.add(o);
+  };
+
+  const rows = 4, rise = 1.7, depth = 2.8, jitter = 1.4, fill = 0.9;
+  // ด้านยาว (เหนือ/ใต้) ไล่ตามแกน x
+  for (const sgn of [-1, 1]) {
+    for (let r = 0; r < rows; r++) {
+      const z = sgn * (halfZ + 3.5 + r * depth), y = 0.4 + r * rise;
+      for (let x = -32; x <= 32; x += 4.2) {
+        if (Math.random() < fill) place(x + (Math.random() - 0.5) * jitter, y, z + (Math.random() - 0.5) * jitter);
+      }
+    }
+  }
+  // ด้านสั้น (ตะวันออก/ตก) ไล่ตามแกน z
+  for (const sgn of [-1, 1]) {
+    for (let r = 0; r < rows; r++) {
+      const x = sgn * (halfX + 3.5 + r * depth), y = 0.4 + r * rise;
+      for (let z = -20; z <= 20; z += 4.2) {
+        if (Math.random() < fill) place(x + (Math.random() - 0.5) * jitter, y, z + (Math.random() - 0.5) * jitter);
+      }
+    }
+  }
+  scene.add(grp);
+}
+buildCrowd();
+
 // ============================================================
 // Goals (two of them, at ±halfX). Returns their world bounds.
 // ============================================================

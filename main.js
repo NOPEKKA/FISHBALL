@@ -475,7 +475,20 @@ async function loadFootball() {
     const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
     const gltf = await new GLTFLoader().loadAsync('./assets/football.glb');
     const model = gltf.scene;
-    model.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = true; o.frustumCulled = false;
+      // วัสดุใน GLB เป็นโลหะเต็มขั้น (metalness 1) ไม่มี env map → เรนเดอร์ดำ
+      // บังคับให้เป็นวัสดุด้าน สีขาว จะได้เห็นเป็นลูกบอลจริง
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach((m) => {
+        if (!m) return;
+        m.metalness = 0.1;
+        m.roughness = 0.65;
+        if (!m.map && m.color) m.color.set(0xffffff);
+        m.needsUpdate = true;
+      });
+    });
 
     // ปรับขนาดโมเดลให้เท่ากับเส้นผ่านศูนย์กลางลูกบอล (2 * radius)
     model.updateMatrixWorld(true);

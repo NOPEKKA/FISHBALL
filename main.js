@@ -204,21 +204,14 @@ async function buildCrowd() {
       const root = g.scene;
       root.updateMatrixWorld(true);
 
-      // วัดความสูงราย mesh แล้ว "ตัด mesh ที่ใหญ่ผิดปกติ" (พื้น/แผ่นยักษ์ที่ทำ bbox เพี้ยน
-      // จนคนไปโผล่กลางสนาม/หญ้าบั๊ค) โดยเทียบกับค่ากลาง
-      const parts = [];
-      root.traverse((o) => { if (o.isMesh) { const bb = new THREE.Box3().setFromObject(o); parts.push({ o, h: bb.max.y - bb.min.y, bb }); } });
-      if (!parts.length) return;
-      const sorted = parts.map((p) => p.h).sort((a, b) => a - b);
-      const med = sorted[Math.floor(sorted.length / 2)] || 1;
-      const box = new THREE.Box3();
-      parts.forEach((p) => {
-        if (p.h > med * 4 + 1e-6) { if (p.o.parent) p.o.parent.remove(p.o); }  // ทิ้ง outlier
-        else box.union(p.bb);
-      });
+      // ใช้กล่องรวมทั้งตัวปรับสูงให้ = 2.2 หน่วย (ปลอดภัย: ทั้งโมเดลจะไม่มีทางใหญ่
+      // เกิน 2.2 → เป็นไปไม่ได้ที่จะปกคลุมสนาม แม้โมเดลจะมีหน่วยเพี้ยน/แผ่นแปลกปน)
+      const box = new THREE.Box3().setFromObject(root);
+      if (box.isEmpty()) return;
       const size = new THREE.Vector3(); box.getSize(size);
       const center = new THREE.Vector3(); box.getCenter(center);
       const sc = (2.2 / (size.y || 1)) * ((CROWD_META[name] || {}).scaleMul || 1);
+      if (!isFinite(sc) || sc <= 0) return;
 
       // แก้วัสดุ: metalness สูงไม่มี env → ดำ (เช่น hitler) ลดลง; cutout บาง → สองด้าน
       root.traverse((o) => {
@@ -243,16 +236,26 @@ async function buildCrowd() {
   const benchGeo = new THREE.BoxGeometry(1.7, 0.35, 1.3);
   const benchMat = new THREE.MeshStandardMaterial({ color: 0x33405c, roughness: 0.9 });
   let seat = 0;
+  const _bb = new THREE.Box3(), _ctr = new THREE.Vector3();
   const place = (x, y, z) => {
     const p = protos[seat % protos.length]; seat++;
     const bench = new THREE.Mesh(benchGeo, benchMat);   // เก้าอี้ (แชร์ geometry)
     bench.position.set(x, y + 0.175, z); grp.add(bench);
     const o = p.obj.clone(true);                          // clone แชร์ geometry → เบาหน่วย
     o.scale.setScalar(p.sc);
-    // จัดให้ตรงกลางตัวอยู่ที่ที่นั่ง (แก้ปัญหาเยื้องไปกลางสนาม) เท้ายืนบนเก้าอี้
-    o.position.set(x - p.cx * p.sc, y + 0.35 - p.minY * p.sc, z - p.cz * p.sc);
     o.rotation.y = Math.atan2(-x, -z) + p.yaw;            // หันหน้าเข้ากลางสนาม
+    o.position.set(x, y, z);
     grp.add(o);
+    // วัดกล่องจริง "หลังวาง" แล้วดันให้กึ่งกลางตัวมานั่งบนเก้าอี้พอดี —
+    // กันได้ทุกกรณี (โมเดล bake พิกัดแปลก/มี bone กระจาย) ไม่มีทางหลุดไปกลางสนาม
+    o.updateMatrixWorld(true);
+    _bb.setFromObject(o);
+    if (!_bb.isEmpty()) {
+      _bb.getCenter(_ctr);
+      o.position.x += x - _ctr.x;
+      o.position.z += z - _ctr.z;
+      o.position.y += (y + 0.35) - _bb.min.y;
+    }
   };
 
   // ที่นั่งแบบ grid คงที่ (ไม่สุ่ม) — ไล่เป็นชั้นสูงขึ้นและถอยหลัง

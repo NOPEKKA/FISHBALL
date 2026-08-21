@@ -84,12 +84,14 @@ function buildField() {
     new THREE.MeshStandardMaterial({ color: 0x2c7a3d, roughness: 1 })
   );
   margin.rotation.x = -Math.PI / 2;
-  margin.position.y = -0.02;
+  margin.position.y = -0.15;   // ดันลงล่างให้พ้นแถบหญ้า กัน z-fighting
   margin.receiveShadow = true;
   group.add(margin);
 
-  // White lines
-  const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  // White lines (polygonOffset กันเส้นสั่นกับหญ้า)
+  const lineMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  });
   const addLine = (w, d, x, z) => {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), lineMat);
     m.rotation.x = -Math.PI / 2;
@@ -184,8 +186,14 @@ function buildStadiumDecor() {
 }
 buildStadiumDecor();
 
-// ---------- คนดูจริงในอัฒจันทร์ (โมเดลดัง ๆ สุ่มวางจนเกือบเต็ม) ----------
+// ---------- คนดูจริงในอัฒจันทร์ (โมเดลดัง ๆ ประจำที่นั่ง) ----------
 const CROWD_FILES = ['charlie_kirk', 'trump', 'obama', 'kanye', 'hitler', 'spiderman', 'batman', 'tungtung'];
+// yaw = หมุนเพิ่มถ้าตัวไหนหันผิด (เรเดียน), scaleMul = คูณสเกลถ้าเล็ก/ใหญ่ไป
+const CROWD_META = {
+  charlie_kirk: { yaw: 0 }, trump: { yaw: 0 }, obama: { yaw: 0 }, kanye: { yaw: 0 },
+  hitler: { yaw: 0 }, spiderman: { yaw: 0 }, batman: { yaw: 0 }, tungtung: { yaw: 0 },
+};
+
 async function buildCrowd() {
   const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
   const loader = new GLTFLoader();
@@ -193,46 +201,72 @@ async function buildCrowd() {
   await Promise.all(CROWD_FILES.map(async (name) => {
     try {
       const g = await loader.loadAsync(`./assets/crowd/${name}.glb`);
-      const s = g.scene;
-      s.updateMatrixWorld(true);
-      const box = new THREE.Box3().setFromObject(s);
+      const root = g.scene;
+      root.updateMatrixWorld(true);
+
+      // วัดความสูงราย mesh แล้ว "ตัด mesh ที่ใหญ่ผิดปกติ" (พื้น/แผ่นยักษ์ที่ทำ bbox เพี้ยน
+      // จนคนไปโผล่กลางสนาม/หญ้าบั๊ค) โดยเทียบกับค่ากลาง
+      const parts = [];
+      root.traverse((o) => { if (o.isMesh) { const bb = new THREE.Box3().setFromObject(o); parts.push({ o, h: bb.max.y - bb.min.y, bb }); } });
+      if (!parts.length) return;
+      const sorted = parts.map((p) => p.h).sort((a, b) => a - b);
+      const med = sorted[Math.floor(sorted.length / 2)] || 1;
+      const box = new THREE.Box3();
+      parts.forEach((p) => {
+        if (p.h > med * 4 + 1e-6) { if (p.o.parent) p.o.parent.remove(p.o); }  // ทิ้ง outlier
+        else box.union(p.bb);
+      });
       const size = new THREE.Vector3(); box.getSize(size);
-      const targetH = 2.2;                      // ปรับสูงทุกตัวให้เท่ากัน ~2.2 หน่วย
-      const sc = targetH / (size.y || 1);
-      s.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = true; } });
-      protos.push({ obj: s, sc, minY: box.min.y });
+      const center = new THREE.Vector3(); box.getCenter(center);
+      const sc = (2.2 / (size.y || 1)) * ((CROWD_META[name] || {}).scaleMul || 1);
+
+      // แก้วัสดุ: metalness สูงไม่มี env → ดำ (เช่น hitler) ลดลง; cutout บาง → สองด้าน
+      root.traverse((o) => {
+        if (!o.isMesh) return;
+        o.castShadow = false; o.frustumCulled = true;
+        const ms = Array.isArray(o.material) ? o.material : [o.material];
+        ms.forEach((m) => {
+          if (!m) return;
+          if (m.metalness != null && m.metalness > 0.3) m.metalness = 0.15;
+          if (m.roughness != null && m.roughness < 0.3) m.roughness = 0.6;
+          m.side = THREE.DoubleSide;
+        });
+      });
+      protos.push({ name, obj: root, sc, minY: box.min.y, cx: center.x, cz: center.z, yaw: (CROWD_META[name] || {}).yaw || 0 });
     } catch (e) { console.warn('โหลดคนดูไม่ได้:', name, e); }
   }));
   if (!protos.length) return;
+  protos.sort((a, b) => CROWD_FILES.indexOf(a.name) - CROWD_FILES.indexOf(b.name));  // เรียงคงที่ → ประจำที่นั่ง
 
   const grp = new THREE.Group();
   const { halfX, halfZ } = CONFIG.field;
+  const benchGeo = new THREE.BoxGeometry(1.7, 0.35, 1.3);
+  const benchMat = new THREE.MeshStandardMaterial({ color: 0x33405c, roughness: 0.9 });
+  let seat = 0;
   const place = (x, y, z) => {
-    const p = protos[Math.floor(Math.random() * protos.length)];
-    const o = p.obj.clone(true);               // clone แชร์ geometry/material → เบาหน่วย
+    const p = protos[seat % protos.length]; seat++;
+    const bench = new THREE.Mesh(benchGeo, benchMat);   // เก้าอี้ (แชร์ geometry)
+    bench.position.set(x, y + 0.175, z); grp.add(bench);
+    const o = p.obj.clone(true);                          // clone แชร์ geometry → เบาหน่วย
     o.scale.setScalar(p.sc);
-    o.position.set(x, y - p.minY * p.sc, z);   // เท้าแตะระดับชั้น
-    o.rotation.y = Math.atan2(-x, -z) + (Math.random() - 0.5) * 0.4;  // หันเข้าสนาม
+    // จัดให้ตรงกลางตัวอยู่ที่ที่นั่ง (แก้ปัญหาเยื้องไปกลางสนาม) เท้ายืนบนเก้าอี้
+    o.position.set(x - p.cx * p.sc, y + 0.35 - p.minY * p.sc, z - p.cz * p.sc);
+    o.rotation.y = Math.atan2(-x, -z) + p.yaw;            // หันหน้าเข้ากลางสนาม
     grp.add(o);
   };
 
-  const rows = 4, rise = 1.7, depth = 2.8, jitter = 1.4, fill = 0.9;
-  // ด้านยาว (เหนือ/ใต้) ไล่ตามแกน x
+  // ที่นั่งแบบ grid คงที่ (ไม่สุ่ม) — ไล่เป็นชั้นสูงขึ้นและถอยหลัง
+  const rows = 3, rise = 1.9, depth = 3.0;
   for (const sgn of [-1, 1]) {
     for (let r = 0; r < rows; r++) {
-      const z = sgn * (halfZ + 3.5 + r * depth), y = 0.4 + r * rise;
-      for (let x = -32; x <= 32; x += 4.2) {
-        if (Math.random() < fill) place(x + (Math.random() - 0.5) * jitter, y, z + (Math.random() - 0.5) * jitter);
-      }
+      const z = sgn * (halfZ + 4 + r * depth), y = 0.4 + r * rise;
+      for (let x = -30; x <= 30; x += 5) place(x, y, z);
     }
   }
-  // ด้านสั้น (ตะวันออก/ตก) ไล่ตามแกน z
   for (const sgn of [-1, 1]) {
     for (let r = 0; r < rows; r++) {
-      const x = sgn * (halfX + 3.5 + r * depth), y = 0.4 + r * rise;
-      for (let z = -20; z <= 20; z += 4.2) {
-        if (Math.random() < fill) place(x + (Math.random() - 0.5) * jitter, y, z + (Math.random() - 0.5) * jitter);
-      }
+      const x = sgn * (halfX + 4 + r * depth), y = 0.4 + r * rise;
+      for (let z = -18; z <= 18; z += 5) place(x, y, z);
     }
   }
   scene.add(grp);

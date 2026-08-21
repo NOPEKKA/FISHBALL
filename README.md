@@ -38,11 +38,12 @@ flopfish-fc/
 - Volume control
 - Name customization
 
-⏳ **Stage 2 (In Progress)**
-- [ ] WebSocket server
-- [ ] Real multiplayer (GitHub + Render)
-- [ ] Room codes
-- [ ] Cross-network play
+✅ **Online multiplayer (Firebase)**
+- Real cross-device play via room codes (no server to host!)
+- Host simulates ball/bots/score; each player streams their own fish
+- Falls back to offline-with-bots automatically if Firebase isn't configured
+
+⏳ **Optional: self-hosted WebSocket server** (`server/`, Render/Railway)
 
 ## Quick Start
 
@@ -51,6 +52,15 @@ flopfish-fc/
 npx http-server -p 5599 -c-1
 # Open: http://localhost:5599
 ```
+
+### Enable Online Multiplayer (Firebase — free, no server)
+1. Go to https://console.firebase.google.com → **Create Project**
+2. **Build → Realtime Database → Create Database** → pick a nearby region → **Start in test mode**
+3. Copy the `databaseURL` it shows you
+4. Paste it into `firebase-config.js` (replace the `YOUR_...` value)
+5. Reload the game. Create a room, share the 4-digit code, friends **Join** with it.
+
+> Until you fill in `firebase-config.js`, the game runs offline against bots — nothing breaks.
 
 ### With Server (LAN)
 ```bash

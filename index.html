@@ -66,10 +66,17 @@
 
     /* Title splash with the FISHBALL artwork */
     .title-screen {
-      justify-content: flex-end; padding-bottom: 9vh; gap: 20px;
+      justify-content: center; gap: 20px;
       background: #1b7fd0 url('./assets/menu-bg.png') center / cover no-repeat;
     }
     .title-btns { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
+    /* เลขเวอร์ชันมุมล่างซ้าย */
+    .version-tag {
+      position: fixed; left: 14px; bottom: 12px; z-index: 30;
+      font-size: 14px; font-weight: 700; letter-spacing: 1px;
+      color: rgba(255,255,255,.85); text-shadow: 0 2px 6px rgba(0,0,0,.6);
+      pointer-events: none;
+    }
     .btn-big.btn-ghost { background: rgba(0,0,0,.45); border-color: rgba(255,255,255,.55); }
 
     /* Volume slider */
@@ -147,6 +154,7 @@
     }
     .slot.mine { border-color: #ffd166; background: rgba(255,209,102,.2); }
     .slot.bot { opacity: .82; }
+    .slot.taken { border-color: #39d353; background: rgba(57,211,83,.16); }
     .slot.empty { opacity: .5; border-style: dashed; }
     .slot-info {
       pointer-events: auto; cursor: pointer; font-family: inherit;
@@ -205,6 +213,7 @@
       <button id="startBtn" class="btn btn-primary btn-big">START</button>
       <button id="settingBtn" class="btn btn-ghost btn-big">SETTING</button>
     </div>
+    <div class="version-tag">v0.2</div>
   </div>
 
   <!-- Screen: Settings (volume only) -->
@@ -325,7 +334,9 @@
   {
     "imports": {
       "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "firebase/app": "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js",
+      "firebase/database": "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js"
     }
   }
   </script>

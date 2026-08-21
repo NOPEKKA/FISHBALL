@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { net, netAvailable, connectRoom, claimSlot, leaveRoom, updateMeta, onPlayers, sendMe, sendWorld, sendWorldForce } from './net.js';
 
 // ============================================================
 // Flopfish FC — a beached-fish football game 🐟⚽
@@ -462,20 +463,37 @@ const ball = {
   vel: new THREE.Vector3(),
 };
 function buildBall() {
-  const geo = new THREE.SphereGeometry(CONFIG.ball.radius, 24, 18);
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 });
-  ball.mesh = new THREE.Mesh(geo, mat);
-  ball.mesh.castShadow = true;
+  // ball.mesh คือกลุ่มว่าง ๆ ก่อน แล้วค่อยยัดโมเดลลูกบอลเข้าไป
+  ball.mesh = new THREE.Group();
   scene.add(ball.mesh);
+  loadFootball();
+}
 
-  // Pentagon-ish spots so rolling is visible
-  const spotMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.5 });
-  for (let i = 0; i < 8; i++) {
-    const s = new THREE.Mesh(new THREE.CircleGeometry(0.16, 5), spotMat);
-    const phi = Math.acos(1 - 2 * (i + 0.5) / 8);
-    const theta = Math.PI * (1 + Math.sqrt(5)) * i;
-    s.position.setFromSphericalCoords(CONFIG.ball.radius + 0.001, phi, theta);
-    s.lookAt(s.position.clone().multiplyScalar(2));
+// โมเดลลูกฟุตบอลจริงจากไฟล์ football.glb — ถ้าโหลดไม่ได้ใช้ทรงกลมสำรอง
+async function loadFootball() {
+  try {
+    const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+    const gltf = await new GLTFLoader().loadAsync('./assets/football.glb');
+    const model = gltf.scene;
+    model.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+
+    // ปรับขนาดโมเดลให้เท่ากับเส้นผ่านศูนย์กลางลูกบอล (2 * radius)
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    const size = new THREE.Vector3(); box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const scale = (CONFIG.ball.radius * 2) / maxDim;
+    model.scale.setScalar(scale);
+    // จัดให้จุดกึ่งกลางโมเดลอยู่ที่จุดหมุน
+    const center = new THREE.Vector3(); box.getCenter(center);
+    model.position.sub(center.multiplyScalar(scale));
+
+    ball.mesh.add(model);
+  } catch (e) {
+    console.warn('โหลด football.glb ไม่ได้ — ใช้ทรงกลมสำรอง', e);
+    const geo = new THREE.SphereGeometry(CONFIG.ball.radius, 24, 18);
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 });
+    const s = new THREE.Mesh(geo, mat); s.castShadow = true;
     ball.mesh.add(s);
   }
 }
@@ -503,11 +521,16 @@ function makePlayer(opts) {
     team: opts.team,           // 'red' | 'blue' | 'fish'
     isLocal: !!opts.isLocal,
     isBot: !!opts.isBot,
+    isRemote: !!opts.isRemote, // ผู้เล่นจริงคนอื่น (ขยับตามข้อมูลเน็ต)
     skin: opts.skin || selectedFishId,
     root: null, flopGroup: null, mixer: null, restY: 0.6,
     pos: new THREE.Vector3(0, 0.6, 0),
     vel: new THREE.Vector3(),
     heading: opts.heading != null ? opts.heading : Math.PI / 2,
+    // เป้าหมายจากเน็ต (สำหรับ isRemote/บอทฝั่ง client) ไว้ค่อย ๆ ลerp เข้าหา
+    netPos: new THREE.Vector3(0, 0.6, 0),
+    netHeading: opts.heading != null ? opts.heading : Math.PI / 2,
+    flopSeq: 0, lastFlopSeq: 0,
     flopTimer: 0, wobble: 0, charge: 0, charging: false,
     botTimer: Math.random() * 0.5,
     breathTimer: Math.random() * 4,  // staggered so fish don't breathe in unison
@@ -709,6 +732,7 @@ function doFlop(p) {
   p.flopTimer = C.cooldown;
   p.wobble = 1;
   p.charge = 0;
+  p.flopSeq = (p.flopSeq || 0) + 1;      // นับจำนวนดีด ให้เครื่องอื่นรู้ว่าดีดแล้ว
   if (p.isLocal) playFlopSound(power);   // only the local flop makes noise
 }
 
@@ -908,7 +932,13 @@ function resetPlayers() {
 const BOT_NAMES = ['ปลาเผา', 'ปลาทู', 'ปลาหมึก', 'ปลาดุก', 'ปลานิล', 'ปลาช่อน'];
 function randomSkin() { return FISH_ROSTER[Math.floor(Math.random() * FISH_ROSTER.length)].id; }
 
-// Build the roster of fish for the match (local player + AI bots).
+function teamOfSlot(mode, slot) {
+  return mode === 'coop' ? 'fish' : (slot < 3 ? 'red' : 'blue');
+}
+
+// Build the roster of fish for the match.
+//  - Offline: local player + AI bots (bots fill non-empty slots).
+//  - Online:  local player + remote humans (from Firebase) + host's bots.
 async function spawnPlayers() {
   for (const p of players) {
     if (p.root) scene.remove(p.root);
@@ -917,27 +947,41 @@ async function spawnPlayers() {
   players = [];
   localPlayer = null;
 
-  const mode = settings.mode;
+  // Online clients take the mode + slot layout from the host's room meta.
+  const online = net.active;
+  const mode = (online && net.meta && net.meta.mode) || settings.mode;
   const count = MODE_SLOTS[mode];
-  const localSlot = Math.max(0, Math.min(settings.slot || 0, count - 1));
-  const teamOf = (slot) => (mode === 'coop' ? 'fish' : (slot < 3 ? 'red' : 'blue'));
+  const localSlot = Math.max(0, Math.min((online ? net.slot : settings.slot) || 0, count - 1));
+  const slotState = (online && net.meta && net.meta.slotState) || settings.slotState;
   const me = settings.name.trim() || 'คุณ';
 
-  // Only spawn a fish for the local slot and any slot set to 'bot'.
-  // 'empty' slots are skipped — a room needn't be full.
   for (let i = 0; i < count; i++) {
-    const isLocal = i === localSlot;
-    if (!isLocal && settings.slotState[i] === 'empty') continue;
-    const team = teamOf(i);
+    const team = teamOfSlot(mode, i);
+    if (i === localSlot) {
+      players.push(makePlayer({ id: i, team, isLocal: true, name: me, skin: selectedFishId }));
+      continue;
+    }
+    // A real player sitting in this slot? (online only)
+    const occ = online ? net.players[i] : null;
+    if (occ) {
+      players.push(makePlayer({
+        id: i, team, isRemote: true,
+        name: occ.name || ('ปลา ' + (i + 1)), skin: occ.skin || randomSkin(),
+      }));
+      continue;
+    }
+    // Otherwise a bot fills the slot, unless it's been closed ('empty').
+    if (slotState[i] === 'empty') continue;
     players.push(makePlayer({
-      id: i, team, isLocal, isBot: !isLocal,
-      name: isLocal ? me : BOT_NAMES[i % BOT_NAMES.length],
-      skin: isLocal ? selectedFishId : randomSkin(),
+      id: i, team, isBot: true,
+      name: BOT_NAMES[i % BOT_NAMES.length], skin: randomSkin(),
     }));
   }
   localPlayer = players.find((p) => p.isLocal) || players[0];
   await Promise.all(players.map((p) => attachModel(p, p.skin)));
   resetPlayers();
+  // seed network targets so proxies don't lerp from the origin on the first frame
+  for (const p of players) { p.netPos.copy(p.pos); p.netHeading = p.heading; }
 }
 
 // Start a fresh match using the chosen room settings.
@@ -971,6 +1015,8 @@ function restartMatch() { startMatch(state.mode); }
 
 function endMatch() {
   state.playing = false;
+  // host แจ้งจบเกมให้ทุกคนเห็นผลพร้อมกัน
+  if (net.active && net.isHost) sendWorldForce(buildWorld());
   const you = state.scoreR, cpu = state.scoreL;
   const win = you > cpu, draw = you === cpu;
   const isCoop = state.mode === 'coop';
@@ -1020,8 +1066,11 @@ function controlPlayer(p, dt) {
     botControl(p, dt);
   }
   if (p.flopTimer > 0) p.flopTimer -= dt;
+}
 
-  // Breathing: play a random gasp at roughly a (slightly slow) breath rate.
+// Breathing: play a random gasp at roughly a (slightly slow) breath rate.
+// Runs for every fish on screen — local, bot, or a networked player.
+function breathTick(p, dt) {
   p.breathTimer -= dt;
   if (p.breathTimer <= 0) {
     playBreath(p);
@@ -1194,21 +1243,84 @@ function updateCamera(dt) {
 // Main loop
 // ============================================================
 const clock = new THREE.Clock();
+// ---------- Online sync helpers ----------
+const _netTmp = new THREE.Vector3();
+function r2(n) { return Math.round(n * 100) / 100; }
+
+// นำข้อมูลจากเน็ต (pos/heading/flop) มาตั้งเป็นเป้าหมายของปลาตัวแทน
+function applyNetTo(p, data) {
+  if (!data) return;
+  if (data.pos) p.netPos.set(data.pos[0], data.pos[1], data.pos[2]);
+  if (typeof data.heading === 'number') p.netHeading = data.heading;
+  if (typeof data.flop === 'number') {
+    if (p.lastFlopSeq && data.flop > p.lastFlopSeq) { p.wobble = 1; p.flopTimer = CONFIG.flop.cooldown; }
+    p.lastFlopSeq = data.flop;
+  }
+}
+// ค่อย ๆ เลื่อนปลาตัวแทนเข้าหาเป้าหมาย (นุ่มขึ้น ไม่กระตุก)
+function lerpToNet(p, dt) {
+  const k = Math.min(1, dt * 12);
+  p.pos.lerp(p.netPos, k);
+  let da = ((p.netHeading - p.heading + Math.PI) % (Math.PI * 2)) - Math.PI;
+  p.heading += da * k;
+}
+// host รวมสภาพโลก (ลูกบอล + บอท + คะแนน + เวลา) เพื่อกระจายให้ทุกคน
+function buildWorld() {
+  const bots = {};
+  for (const p of players) {
+    if (p.isBot) bots[p.id] = { pos: [r2(p.pos.x), r2(p.pos.y), r2(p.pos.z)], heading: +p.heading.toFixed(3), flop: p.flopSeq || 0 };
+  }
+  return {
+    ball: [r2(ball.pos.x), r2(ball.pos.y), r2(ball.pos.z)], bots,
+    scoreL: state.scoreL, scoreR: state.scoreR,
+    timeLeft: Math.max(0, state.timeLeft), playing: state.playing,
+  };
+}
+// client อ่านสภาพโลกจาก host มาใช้ (ลูกบอล + คะแนน + เวลา)
+function applyWorld(dt) {
+  const w = net.world; if (!w) return;
+  if (w.ball) ball.pos.lerp(_netTmp.set(w.ball[0], w.ball[1], w.ball[2]), Math.min(1, dt * 12));
+  if (w.scoreR > state.scoreR || w.scoreL > state.scoreL) { playGoalSound(); flashGoal(); }
+  state.scoreL = w.scoreL || 0; state.scoreR = w.scoreR || 0;
+  if (w.timeLeft != null) state.timeLeft = w.timeLeft;
+  updateHUD();
+  if (w.playing === false || state.timeLeft <= 0) endMatch();
+}
+
 function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
+  const now = performance.now();
 
   if (state.playing) {
-    for (const p of players) { controlPlayer(p, dt); stepFish(p, dt); }
-    stepRonaldo(dt);
-    stepBall(dt);
-    for (const p of players) collideFishBall(p);
-
-    if (state.goalCooldown > 0) state.goalCooldown -= dt;
-
-    state.timeLeft -= dt;
-    if (state.timeLeft <= 0) { state.timeLeft = 0; updateHUD(); endMatch(); }
-    else updateHUD();
+    const online = net.active;
+    if (!online || net.isHost) {
+      // ออฟไลน์ หรือ host: จำลองทุกอย่าง (ยกเว้นปลาคนอื่นที่อ่านจากเน็ต)
+      for (const p of players) {
+        if (p.isRemote) { applyNetTo(p, net.players[p.id]); lerpToNet(p, dt); }
+        else { controlPlayer(p, dt); stepFish(p, dt); }
+      }
+      stepRonaldo(dt);
+      stepBall(dt);
+      for (const p of players) collideFishBall(p);
+      if (state.goalCooldown > 0) state.goalCooldown -= dt;
+      state.timeLeft -= dt;
+      if (state.timeLeft <= 0) { state.timeLeft = 0; updateHUD(); endMatch(); }
+      else updateHUD();
+    } else {
+      // client: คุมปลาตัวเอง อ่านที่เหลือจากเน็ต
+      for (const p of players) {
+        if (p.isLocal) { controlPlayer(p, dt); stepFish(p, dt); }
+        else if (p.isRemote) { applyNetTo(p, net.players[p.id]); lerpToNet(p, dt); }
+        else if (p.isBot) { applyNetTo(p, net.world && net.world.bots && net.world.bots[p.id]); lerpToNet(p, dt); }
+      }
+      applyWorld(dt);
+    }
+    if (online) {
+      if (localPlayer) sendMe(localPlayer, now);
+      if (net.isHost) sendWorld(buildWorld(), now);
+    }
+    for (const p of players) breathTick(p, dt);
   }
 
   for (const p of players) animateFish(p, t);
@@ -1259,6 +1371,7 @@ async function boot() {
 function goToMenu() {
   state.playing = false;
   ronaldo.active = false;
+  if (net.active) leaveRoom();   // ออกจากห้องออนไลน์
   showScreen('title');
 }
 
@@ -1353,22 +1466,68 @@ document.getElementById('joinGoBtn').addEventListener('click', () => {
   const code = document.getElementById('joinCode').value.trim();
   if (code.length < 4) { toast('ใส่เลขห้อง 4 ตัวก่อน'); return; }
   settings.roomCode = code;
-  settings.mode = 'versus';   // joiner defaults to versus locally (host mode syncs in Stage 2)
+  settings.mode = 'versus';   // ค่าเริ่มต้น (ออนไลน์จะรับโหมดจริงจาก host)
   openLobby(false);
 });
 
 // ---------- Lobby (pick your slot / side) ----------
-function openLobby(isHost) {
+// ข้อมูล presence ของตัวเราสำหรับช่องหนึ่ง ๆ
+function presenceFor(slot) {
+  const mode = (net.active && net.meta && net.meta.mode) || settings.mode;
+  return {
+    name: settings.name.trim() || 'คุณ', team: teamOfSlot(mode, slot),
+    skin: selectedFishId, host: net.isHost, pos: [0, 0.6, 0], heading: 1.57, flop: 0,
+  };
+}
+
+async function openLobby(isHost) {
   settings.slot = 0;
-  const count = MODE_SLOTS[settings.mode];
+  let count = MODE_SLOTS[settings.mode];
   settings.slotState = Array(count).fill('bot');   // default: fill others with bots
+
+  const online = netAvailable();
+  if (online && !isHost) settings.slot = -1;   // joiner ยังไม่เลือกช่อง
   document.getElementById('lobbyCode').textContent = settings.roomCode || '----';
   document.getElementById('lobbyTag').textContent = settings.mode === 'coop' ? '🤝 ร่วมมือกัน' : '⚔️ แข่งกันเอง';
-  document.getElementById('lobbyNote').textContent = isHost
-    ? '* แตะช่องเพื่อย้ายตัวเอง · ปุ่มขวาสลับ บอท/ปิดช่อง — ห้องไม่ต้องเต็ม 6 คนก็ได้'
-    : '* เลือกช่องของคุณ แล้วกดเริ่มเกม (คนจริงเข้าเต็มห้องได้เมื่อเปิดออนไลน์)';
-  buildLobby();
+  document.getElementById('lobbyNote').textContent = !online
+    ? '* แตะช่องเพื่อย้ายตัวเอง · ปุ่มขวาสลับ บอท/ปิดช่อง — เล่นกับบอท (ออฟไลน์)'
+    : (isHost
+      ? '* ออนไลน์: แชร์เลขห้องให้เพื่อน · แตะช่องเพื่อย้าย · ปุ่มขวาสลับ บอท/ปิดช่อง'
+      : '* ออนไลน์: แตะช่องว่างเพื่อนั่ง แล้วกดเริ่มเกม');
   showScreen('lobby');
+  buildLobby();
+
+  if (!online) return;
+
+  // ต่อเข้าห้อง Firebase
+  if (isHost) {
+    const meta = {
+      mode: settings.mode, sec: settings.matchSeconds, diff: settings.difficulty,
+      slotState: settings.slotState, hostSlot: 0, started: false,
+    };
+    await connectRoom({ code: settings.roomCode, isHost: true, slot: 0, meta, presence: presenceFor(0) });
+  } else {
+    settings.slot = -1;   // joiner ยังไม่เลือกช่อง จนกว่าจะแตะ
+    await connectRoom({ code: settings.roomCode, isHost: false });
+  }
+  onPlayers(syncLobbyFromNet);
+  setTimeout(syncLobbyFromNet, 500);   // เผื่อ meta มาช้า
+}
+
+// อัปเดตล็อบบี้จากข้อมูลเน็ต (host meta + ผู้เล่นในห้อง)
+function syncLobbyFromNet() {
+  if (!net.active && !net.code) return;
+  if (screens.lobby.classList.contains('hidden')) return;   // อัปเดตเฉพาะตอนอยู่ล็อบบี้
+  // joiner รับโหมด/ตั้งค่าจาก host
+  if (!net.isHost && net.meta) {
+    settings.mode = net.meta.mode || settings.mode;
+    settings.matchSeconds = net.meta.sec || settings.matchSeconds;
+    settings.difficulty = net.meta.diff || settings.difficulty;
+    const count = MODE_SLOTS[settings.mode];
+    settings.slotState = (net.meta.slotState && net.meta.slotState.slice(0, count)) || Array(count).fill('bot');
+    document.getElementById('lobbyTag').textContent = settings.mode === 'coop' ? '🤝 ร่วมมือกัน' : '⚔️ แข่งกันเอง';
+  }
+  buildLobby();
 }
 
 // Render the slot picker. Tap a slot body to move yourself there; the small
@@ -1378,27 +1537,35 @@ function buildLobby() {
   body.innerHTML = '';
   const me = settings.name.trim() || 'คุณ';
 
+  const online = net.active || (!!net.code && !net.isHost);
   const mkSlot = (idx, team, botLabel) => {
     const mine = settings.slot === idx;
     const st = settings.slotState[idx];
+    // ผู้เล่นจริงคนอื่นนั่งช่องนี้อยู่ไหม (ออนไลน์)
+    const occ = online && net.players[idx] && idx !== net.slot ? net.players[idx] : null;
     const row = document.createElement('div');
-    row.className = `slot ${team}` + (mine ? ' mine' : (st === 'empty' ? ' empty' : ' bot'));
+    row.className = `slot ${team}` + (mine ? ' mine' : occ ? ' taken' : (st === 'empty' ? ' empty' : ' bot'));
 
-    const label = mine ? '★ ' + me : (st === 'empty' ? 'ว่าง' : botLabel);
+    const label = mine ? '★ ' + me : occ ? ('👤 ' + (occ.name || 'ผู้เล่น')) : (st === 'empty' ? 'ว่าง' : botLabel);
     const info = document.createElement('span');
     info.className = 'slot-info';
     info.innerHTML = `<span class="dot"></span><span>${label}</span>`;
-    info.addEventListener('click', () => {
-      if (mine) return;
-      // move here; the slot you left reopens as a bot
+    info.addEventListener('click', async () => {
+      if (mine || occ) return;   // นั่งช่องตัวเอง/ช่องคนอื่นไม่ได้
       const old = settings.slot;
       settings.slot = idx;
-      settings.slotState[old] = 'bot';
+      if (!online || net.isHost) { if (old >= 0) settings.slotState[old] = 'bot'; }
+      if (online) {
+        await claimSlot(idx, presenceFor(idx));
+        if (net.isHost) updateMeta({ slotState: settings.slotState, hostSlot: idx });
+      }
       buildLobby();
     });
     row.appendChild(info);
 
-    if (!mine) {
+    // ปุ่มสลับ บอท/ปิดช่อง — เจ้าของห้องเท่านั้น (ออฟไลน์ก็ได้)
+    const canToggle = !mine && !occ && (!online || net.isHost);
+    if (canToggle) {
       const tg = document.createElement('button');
       tg.className = 'slot-toggle';
       tg.textContent = st === 'empty' ? '＋' : '✕';
@@ -1406,6 +1573,7 @@ function buildLobby() {
       tg.addEventListener('click', (e) => {
         e.stopPropagation();
         settings.slotState[idx] = st === 'empty' ? 'bot' : 'empty';
+        if (online && net.isHost) updateMeta({ slotState: settings.slotState });
         buildLobby();
       });
       row.appendChild(tg);
@@ -1430,11 +1598,25 @@ function buildLobby() {
     });
   }
 }
-document.getElementById('lobbyStart').addEventListener('click', () => startMatch(settings.mode));
-document.getElementById('lobbyBack').addEventListener('click', () => showScreen('home'));
+document.getElementById('lobbyStart').addEventListener('click', async () => {
+  // ออนไลน์: ต้องนั่งช่องก่อน (joiner ที่ยังไม่เลือก)
+  if (netAvailable() && net.code) {
+    if (settings.slot < 0 || (!net.active)) {
+      const count = MODE_SLOTS[(net.meta && net.meta.mode) || settings.mode];
+      let open = -1;
+      for (let i = 0; i < count; i++) { if (!net.players[i]) { open = i; break; } }
+      if (open < 0) { toast('ห้องเต็มแล้ว'); return; }
+      settings.slot = open;
+      await claimSlot(open, presenceFor(open));
+    }
+    if (net.isHost) updateMeta({ started: true });
+  }
+  startMatch((net.active && net.meta && net.meta.mode) || settings.mode);
+});
+document.getElementById('lobbyBack').addEventListener('click', () => { if (net.active) leaveRoom(); showScreen('home'); });
 
-// Game over
-document.getElementById('againBtn').addEventListener('click', restartMatch);
+// Game over — เล่นอีกครั้ง (ออนไลน์กลับเมนูเพราะต้องตั้งห้องใหม่)
+document.getElementById('againBtn').addEventListener('click', () => { if (net.active) goToMenu(); else restartMatch(); });
 document.getElementById('menuBtn').addEventListener('click', goToMenu);
 
 // Fullscreen toggle (button + F key)

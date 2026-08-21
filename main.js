@@ -70,7 +70,10 @@ function buildField() {
     const w = (halfX * 2) / stripes;
     const geo = new THREE.PlaneGeometry(w, halfZ * 2);
     const shade = i % 2 === 0 ? 0x3fa34d : 0x379445;
-    const mat = new THREE.MeshStandardMaterial({ color: shade, roughness: 1 });
+    // polygonOffset → แถบหญ้าชนะ depth test เสมอ ไม่กระพริบกับพื้นรองด้านล่าง
+    const mat = new THREE.MeshStandardMaterial({
+      color: shade, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
     const m = new THREE.Mesh(geo, mat);
     m.rotation.x = -Math.PI / 2;
     m.position.set(-halfX + w * (i + 0.5), 0, 0);
@@ -78,13 +81,13 @@ function buildField() {
     group.add(m);
   }
 
-  // Surrounding grass margin (darker)
+  // Surrounding grass margin (darker) — ดันลงล่างชัด ๆ กัน z-fighting กับแถบหญ้า
   const margin = new THREE.Mesh(
     new THREE.PlaneGeometry(200, 200),
     new THREE.MeshStandardMaterial({ color: 0x2c7a3d, roughness: 1 })
   );
   margin.rotation.x = -Math.PI / 2;
-  margin.position.y = -0.15;   // ดันลงล่างให้พ้นแถบหญ้า กัน z-fighting
+  margin.position.y = -0.4;
   margin.receiveShadow = true;
   group.add(margin);
 

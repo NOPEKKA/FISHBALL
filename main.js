@@ -144,7 +144,7 @@ function buildStadiumDecor() {
   addBoard(halfZ * 2, halfX + gap, 0, Math.PI / 2);
 
   // อัฒจันทร์ลาดเอียงมีคนดู 4 ด้าน
-  const standDepth = 26, standH = 16, setback = 5;
+  const standDepth = 26, standH = 16, setback = 11;   // เว้นระยะอัฒจันทร์ให้ห่างสนาม
   const standMat = new THREE.MeshStandardMaterial({ color: 0x2a3550, roughness: 1, side: THREE.DoubleSide });
   const addStand = (len, cx, cz, ry) => {
     const geo = new THREE.PlaneGeometry(len, Math.hypot(standDepth, standH));
@@ -199,6 +199,9 @@ const CROWD_META = {
 
 async function buildCrowd() {
   const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+  // SkeletonUtils.clone → โคลนโครงกระดูกแยกกัน (โมเดลมี bone ถ้าใช้ .clone ธรรมดา
+  // ทุกก็อปปี้จะแชร์ skeleton เดียว → ไปกองเรนเดอร์ที่จุดกำเนิดกลางสนาม)
+  const { clone: skeletonClone } = await import('three/addons/utils/SkeletonUtils.js');
   const loader = new GLTFLoader();
   const protos = [];
   await Promise.all(CROWD_FILES.map(async (name) => {
@@ -244,7 +247,7 @@ async function buildCrowd() {
     const p = protos[seat % protos.length]; seat++;
     const bench = new THREE.Mesh(benchGeo, benchMat);   // เก้าอี้ (แชร์ geometry)
     bench.position.set(x, y + 0.175, z); grp.add(bench);
-    const o = p.obj.clone(true);                          // clone แชร์ geometry → เบาหน่วย
+    const o = skeletonClone(p.obj);                       // โคลนพร้อม skeleton แยก
     o.scale.setScalar(p.sc);
     o.rotation.y = Math.atan2(-x, -z) + p.yaw;            // หันหน้าเข้ากลางสนาม
     o.position.set(x, y, z);
@@ -261,18 +264,18 @@ async function buildCrowd() {
     }
   };
 
-  // ที่นั่งแบบ grid คงที่ (ไม่สุ่ม) — ไล่เป็นชั้นสูงขึ้นและถอยหลัง
-  const rows = 3, rise = 1.9, depth = 3.0;
+  // ที่นั่งแบบ grid คงที่ (ไม่สุ่ม) — ไล่เป็นชั้นสูงขึ้นและถอยหลัง เว้นห่างจากขอบสนาม
+  const rows = 3, rise = 1.9, depth = 3.0, setback = 9;
   for (const sgn of [-1, 1]) {
     for (let r = 0; r < rows; r++) {
-      const z = sgn * (halfZ + 4 + r * depth), y = 0.4 + r * rise;
-      for (let x = -30; x <= 30; x += 5) place(x, y, z);
+      const z = sgn * (halfZ + setback + r * depth), y = 0.4 + r * rise;
+      for (let x = -32; x <= 32; x += 5) place(x, y, z);
     }
   }
   for (const sgn of [-1, 1]) {
     for (let r = 0; r < rows; r++) {
-      const x = sgn * (halfX + 4 + r * depth), y = 0.4 + r * rise;
-      for (let z = -18; z <= 18; z += 5) place(x, y, z);
+      const x = sgn * (halfX + setback + r * depth), y = 0.4 + r * rise;
+      for (let z = -20; z <= 20; z += 5) place(x, y, z);
     }
   }
   scene.add(grp);
@@ -749,9 +752,9 @@ function makePlayerLabel(p) {
   canvas.width = 256; canvas.height = 72;
   const tex = new THREE.CanvasTexture(canvas);
   tex.anisotropy = 4;
-  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, opacity: 0.72 });
   const spr = new THREE.Sprite(mat);
-  spr.scale.set(3.4, 0.96, 1);
+  spr.scale.set(2.4, 0.68, 1);   // เล็กลง ไม่เด่นเกินไป
   spr.renderOrder = 999;
   p.label = spr; p.labelTex = tex; p.labelCanvas = canvas;
   scene.add(spr);

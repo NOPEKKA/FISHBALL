@@ -883,6 +883,7 @@ function animateHuman(t) {
   if (!ronaldo.root) return;
   ronaldo.root.visible = ronaldo.active;
   if (!ronaldo.active) return;
+  if (ronaldo.siuu) { animateSiuu(); return; }   // คัตซีนฉลอง SIUUU
   ronaldo.root.position.copy(ronaldo.pos);
   ronaldo.root.rotation.y = ronaldo.heading;
 
@@ -913,6 +914,32 @@ function animateHuman(t) {
 
   // Subtle vertical bob while walking
   ronaldo.root.position.y = Math.abs(Math.sin(ronaldo.walkPhase)) * 0.06 * ronaldo.moving;
+}
+
+// ท่าฉลอง SIUUUU — กระโดด หมุนตัว กางแขนออก แล้วลงยืนกางแขน
+function animateSiuu() {
+  const s = ronaldo.siuu;
+  s.t += 1 / 60;
+  ronaldo.root.position.copy(ronaldo.pos);
+  // กระโดดหนึ่งครั้งช่วงต้น (0..0.9s)
+  const jt = Math.min(s.t / 0.9, 1);
+  ronaldo.root.position.y = Math.sin(jt * Math.PI) * 1.7;
+  // หมุนครึ่งรอบตอนกระโดด แล้วค้าง (หันมาทางกล้อง/สนาม)
+  ronaldo.root.rotation.y = ronaldo.heading + jt * Math.PI;
+
+  const b = ronaldo.bones, rest = ronaldo.rest;
+  if (b && rest) {
+    const spread = Math.min(s.t * 3, 1) * 1.35;   // กางแขนออกเต็มที่เร็ว ๆ
+    if (b.leftArm)  { b.leftArm.rotation.x = rest.leftArm.x - 0.15; b.leftArm.rotation.z = rest.leftArm.z + spread; }
+    if (b.rightArm) { b.rightArm.rotation.x = rest.rightArm.x - 0.15; b.rightArm.rotation.z = rest.rightArm.z - spread; }
+    if (b.leftForeArm) b.leftForeArm.rotation.x = rest.leftForeArm.x;
+    if (b.rightForeArm) b.rightForeArm.rotation.x = rest.rightForeArm.x;
+    // ขาตรงชิด (ไม่เดิน)
+    if (b.leftUpLeg) b.leftUpLeg.rotation.x = rest.leftUpLeg.x;
+    if (b.rightUpLeg) b.rightUpLeg.rotation.x = rest.rightUpLeg.x;
+    if (b.leftLeg) b.leftLeg.rotation.x = rest.leftLeg.x;
+    if (b.rightLeg) b.rightLeg.rotation.x = rest.rightLeg.x;
+  }
 }
 
 // ============================================================
@@ -1019,8 +1046,9 @@ function playGoalSound() {
   } catch (e) {}
 }
 
-// ---------- Fish breathing sounds (9 random clips) ----------
+// ---------- Fish breathing sounds (9 random clips) + SIUUU ----------
 const breathBuffers = [];   // decoded AudioBuffers
+let siuuBuffer = null;      // เสียง SIUUU ของ Ronaldo
 async function loadBreathSounds() {
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1031,7 +1059,20 @@ async function loadBreathSounds() {
         breathBuffers[i] = await audioCtx.decodeAudioData(arr);
       } catch (e) { /* skip a missing/bad clip */ }
     }));
+    try {
+      const res = await fetch('./assets/sounds/siuuu.mp3');
+      siuuBuffer = await audioCtx.decodeAudioData(await res.arrayBuffer());
+    } catch (e) { /* siuu optional */ }
   } catch (e) { /* audio optional */ }
+}
+// เสียง SIUUU ตอน Ronaldo ยิงเข้า
+function playSiuu() {
+  if (!audioCtx || !siuuBuffer) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const src = audioCtx.createBufferSource(); src.buffer = siuuBuffer;
+  const gain = audioCtx.createGain(); gain.gain.value = 0.9;
+  src.connect(gain).connect(audioOut());
+  src.start();
 }
 // Play one random breath clip, panned by the fish's field position.
 function playBreath(p) {
@@ -1063,7 +1104,8 @@ const state = {
   goalTarget: 3,       // จำนวนลูกรวมที่เล่น (ยิงครบ = จบเกม)
   phase: 'live',       // 'kickoff' (นับถอยหลัง) | 'live' | 'celebrate' (ฉลองประตู)
   timer: 0,            // เวลาที่เหลือของ phase ปัจจุบัน
-  celebrate: null,     // { name, team, assist, own } ข้อมูลประตูล่าสุด
+  celebrate: null,     // { name, team, assist, own, ronaldo } ข้อมูลประตูล่าสุด
+  cutscene: false,     // คัตซีน SIUUU ของ Ronaldo
 };
 
 // Per-mode configuration
@@ -1240,6 +1282,7 @@ async function startMatch(mode) {
   await spawnPlayers();
   // เริ่มด้วยการนับถอยหลัง 3-2-1 (กันบั๊คบอลเข้าเองตอนเริ่ม + ให้ผู้เล่นตั้งตัว)
   state.phase = 'kickoff'; state.timer = 3; state.celebrate = null;
+  state.cutscene = false; ronaldo.siuu = null;
   showCountdown(3);
   updateHUD();
 
@@ -1254,6 +1297,7 @@ function endMatch() {
   if (!state.playing) return;   // กันเรียกซ้ำ (client อ่าน world ทุกเฟรม)
   state.playing = false;
   state.phase = 'live';
+  state.cutscene = false; ronaldo.siuu = null;
   hideBigMsg();
   // host แจ้งจบเกมให้ทุกคนเห็นผลพร้อมกัน
   if (net.active && net.isHost) sendWorldForce(buildWorld());
@@ -1301,6 +1345,12 @@ function showCountdown(n) {
 }
 function showGoalMsg(c) {
   bigMsg.classList.remove('hidden');
+  if (c.ronaldo) {
+    bigMsg.innerHTML = `<div class="big-goal">⚽ GOAL!</div>` +
+      `<div class="big-sub" style="color:#4a90ff">Ronaldo ยิงเข้า!</div>` +
+      `<div class="big-goal" style="color:#ffd166;letter-spacing:6px">SIUUUU 🐐</div>`;
+    return;
+  }
   const who = c.own ? `${c.name} เข้าประตูตัวเอง 🙈` : `${c.name} ยิงเข้า!`;
   const assist = c.assist ? `<div class="big-assist">แอสซิสต์: ${c.assist}</div>` : '';
   const col = TEAMS[c.team] ? TEAMS[c.team].css : '#fff';
@@ -1311,9 +1361,22 @@ function hideBigMsg() { bigMsg.classList.add('hidden'); bigMsg.innerHTML = ''; }
 function onGoal(scoringSide) {
   // Ball in the +X goal (side +1) => right team scored.
   if (scoringSide > 0) state.scoreR++; else state.scoreL++;
-  playGoalSound();
   flashGoal();
 
+  // โหมด co-op: บอลเข้าประตูซ้าย (-1) = Ronaldo ยิงเข้า → SIUUU + คัตซีน
+  if (state.mode === 'coop' && scoringSide < 0) {
+    playSiuu();
+    state.celebrate = { name: 'Ronaldo', ronaldo: true };
+    state.phase = 'celebrate';
+    state.timer = 3.6;                     // ยาวหน่อยให้คัตซีน SIUUU
+    state.cutscene = true;
+    ronaldo.siuu = { t: 0 };
+    showGoalMsg(state.celebrate);
+    updateHUD();
+    return;
+  }
+
+  playGoalSound();
   // ใครยิง / assist — จากผู้สัมผัสบอลล่าสุด
   const scorer = ball.lastTouch;
   let own = false, assistName = null, name = 'ใครสักคน';
@@ -1540,6 +1603,17 @@ function animateFish(p, t) {
 const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3();
 function updateCamera(dt) {
+  // คัตซีน SIUUU — เล็งกล้องไปที่ Ronaldo แล้ววนช้า ๆ
+  if (state.cutscene && ronaldo.root) {
+    const rp = ronaldo.root.position;
+    const ang = performance.now() * 0.0007;
+    const desired = new THREE.Vector3(rp.x + Math.sin(ang) * 6, rp.y + 3.4, rp.z + Math.cos(ang) * 6);
+    camPos.lerp(desired, 1 - Math.pow(0.02, dt));
+    camera.position.copy(camPos);
+    camTarget.lerp(new THREE.Vector3(rp.x, rp.y + 2.2, rp.z), 1 - Math.pow(0.02, dt));
+    camera.lookAt(camTarget);
+    return;
+  }
   const p = localPlayer;
   if (!p) return;
   const behind = new THREE.Vector3(Math.sin(p.heading), 0, Math.cos(p.heading));
@@ -1631,6 +1705,7 @@ function tick() {
         state.timer -= dt;
         lerpRemotes();
         if (state.timer <= 0) {
+          state.cutscene = false; ronaldo.siuu = null;   // จบคัตซีน SIUUU
           if (state.scoreL + state.scoreR >= state.goalTarget) { endMatch(); }
           else { resetBall(); resetPlayers(); resetRonaldo(); state.phase = 'kickoff'; state.timer = 3; showCountdown(3); }
         }
@@ -1658,7 +1733,8 @@ function tick() {
       if (localPlayer) sendMe(localPlayer, now);
       if (net.isHost) sendWorld(buildWorld(), now);
     }
-    for (const p of players) breathTick(p, dt);
+    // เสียงหายใจปลา เฉพาะตอนเกมเริ่มจริง (ไม่ดังตอนนับถอยหลัง/ฉลองประตู)
+    if (state.phase === 'live') for (const p of players) breathTick(p, dt);
   }
 
   for (const p of players) animateFish(p, t);

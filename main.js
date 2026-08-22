@@ -648,7 +648,7 @@ const ball = {
 // ลูกฟุตบอลลายขาว-ดำแบบ procedural (ไม่ต้องพึ่ง texture)
 // ใช้ทรงอิโคซาฮีดรอน แล้วทาสีดำที่หน้าใกล้ 12 มุม (เป็นห้าเหลี่ยม) ที่เหลือขาว
 function buildSoccerBall(radius) {
-  const geo = new THREE.IcosahedronGeometry(radius, 5);   // ละเอียดขึ้น → กลม ไม่เหลี่ยม
+  const geo = new THREE.IcosahedronGeometry(radius, 6);   // ละเอียดขึ้น → กลม ไม่เหลี่ยม
   geo.computeVertexNormals();
   const t = (1 + Math.sqrt(5)) / 2;
   const verts = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t],
@@ -760,6 +760,8 @@ function makePlayer(opts) {
     breathTimer: Math.random() * 4,  // staggered so fish don't breathe in unison
     phase: Math.random() * 10,      // desync flop animation between fish
     label: null, labelTex: null, labelCanvas: null,
+    stats: { goals: 0, assists: 0, shots: 0, blocks: 0 },
+    shotCd: 0,
   };
 }
 
@@ -939,7 +941,8 @@ renderer.domElement.addEventListener('pointerup', () => { if (localPlayer) { doF
 
 // A flop: impulse forward from the fish's heading, with random scatter.
 function doFlop(p) {
-  if (!p || p.flopTimer > 0 || !state.playing) { if (p) p.charge = 0; return; }
+  // ดิ้นได้เฉพาะตอนเล่นจริง (ไม่ใช่ตอนนับถอยหลัง/ฉลองประตู)
+  if (!p || p.flopTimer > 0 || !state.playing || state.phase !== 'live') { if (p) p.charge = 0; return; }
   const C = CONFIG.flop;
   const chargeAmt = Math.min(p.charge / C.chargeMax, 1);
   const power = 1 + chargeAmt * C.chargeBoost;
@@ -1052,8 +1055,10 @@ const state = {
   mode: null,          // 'versus' | 'coop'
   scoreL: 0,           // LEFT goal = opponent / Ronaldo
   scoreR: 0,           // RIGHT goal = you / fish team
-  timeLeft: CONFIG.matchSeconds,
-  goalCooldown: 0,
+  goalTarget: 3,       // จำนวนลูกรวมที่เล่น (ยิงครบ = จบเกม)
+  phase: 'live',       // 'kickoff' (นับถอยหลัง) | 'live' | 'celebrate' (ฉลองประตู)
+  timer: 0,            // เวลาที่เหลือของ phase ปัจจุบัน
+  celebrate: null,     // { name, team, assist, own } ข้อมูลประตูล่าสุด
 };
 
 // Per-mode configuration
@@ -1073,7 +1078,7 @@ const DIFFICULTY = {
 const settings = {
   name: '',
   mode: 'versus',
-  matchSeconds: 120,
+  goalTarget: 3,     // เล่นกี่ลูก (1/3/5) — ยิงครบจบเกม
   difficulty: 'normal',
   roomCode: '',
   slot: 0,          // which lobby slot the local player picked
@@ -1128,6 +1133,7 @@ function resizeRenderer() {
 function resetBall() {
   ball.pos.set(0, CONFIG.ball.radius, 0);
   ball.vel.set(0, 0, 0);
+  ball.lastTouch = null; ball.prevTouch = null;
 }
 function resetRonaldo() {
   ronaldo.pos.set(CONFIG.field.halfX - 4, 0, 0);
@@ -1224,10 +1230,12 @@ async function startMatch(mode) {
   els.scoreLabel.textContent = cfg.ronaldo ? 'ทีมปลา : Ronaldo' : 'แดง : น้ำเงิน';
 
   state.scoreL = 0; state.scoreR = 0;
-  state.timeLeft = settings.matchSeconds;
-  state.goalCooldown = 0;
+  state.goalTarget = (net.active && net.meta && net.meta.goals) || settings.goalTarget || 3;
   resetBall(); resetRonaldo();
   await spawnPlayers();
+  // เริ่มด้วยการนับถอยหลัง 3-2-1 (กันบั๊คบอลเข้าเองตอนเริ่ม + ให้ผู้เล่นตั้งตัว)
+  state.phase = 'kickoff'; state.timer = 3; state.celebrate = null;
+  showCountdown(3);
   updateHUD();
 
   state.playing = true;
@@ -1238,7 +1246,10 @@ async function startMatch(mode) {
 function restartMatch() { startMatch(state.mode); }
 
 function endMatch() {
+  if (!state.playing) return;   // กันเรียกซ้ำ (client อ่าน world ทุกเฟรม)
   state.playing = false;
+  state.phase = 'live';
+  hideBigMsg();
   // host แจ้งจบเกมให้ทุกคนเห็นผลพร้อมกัน
   if (net.active && net.isHost) sendWorldForce(buildWorld());
   const you = state.scoreR, cpu = state.scoreL;
@@ -1252,26 +1263,70 @@ function endMatch() {
   const left = isCoop ? 'ทีมปลา' : 'แดง';
   const right = isCoop ? 'Ronaldo' : 'น้ำเงิน';
   els.goScore.innerHTML = `สกอร์สุดท้าย &nbsp; <b>${left} ${you} : ${cpu} ${right}</b>`;
+  renderStatsTable();
   showScreen('gameover');
+}
+
+// ตารางสถิติผู้เล่น (ยิงเข้า/แอสซิสต์/ยิง/บล็อก) หน้า จบเกม
+function renderStatsTable() {
+  const el = document.getElementById('goStats');
+  if (!el) return;
+  const list = players.filter((p) => p.stats);
+  if (!list.length) { el.innerHTML = ''; return; }
+  const rows = list.map((p) => {
+    const me = p.isLocal ? ' class="st-me"' : '';
+    const dot = TEAMS[p.team] ? `<span style="color:${TEAMS[p.team].css}">●</span> ` : '';
+    return `<tr${me}><td>${dot}${p.isLocal ? '★ ' : ''}${p.name}</td>` +
+      `<td>${p.stats.goals}</td><td>${p.stats.assists}</td><td>${p.stats.shots}</td><td>${p.stats.blocks}</td></tr>`;
+  }).join('');
+  el.innerHTML = `<table><thead><tr><th>ผู้เล่น</th><th>⚽ เข้า</th><th>🅰️ แอสซิสต์</th><th>🎯 ยิง</th><th>🛡️ บล็อก</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function updateHUD() {
   els.score.textContent = `${state.scoreR} : ${state.scoreL}`;
-  const m = Math.floor(state.timeLeft / 60);
-  const s = Math.floor(state.timeLeft % 60);
-  els.timer.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  const played = state.scoreR + state.scoreL;
+  els.timer.textContent = `ลูก ${Math.min(played + (state.phase === 'live' ? 1 : 0), state.goalTarget)}/${state.goalTarget}`;
 }
 
+// ---------- ข้อความกลางจอ (นับถอยหลัง + GOAL) ----------
+const bigMsg = document.getElementById('bigMsg');
+function showCountdown(n) {
+  bigMsg.classList.remove('hidden');
+  bigMsg.innerHTML = n > 0 ? `<div class="big-num">${n}</div>` : '<div class="big-goal">เริ่ม!</div>';
+}
+function showGoalMsg(c) {
+  bigMsg.classList.remove('hidden');
+  const who = c.own ? `${c.name} เข้าประตูตัวเอง 🙈` : `${c.name} ยิงเข้า!`;
+  const assist = c.assist ? `<div class="big-assist">แอสซิสต์: ${c.assist}</div>` : '';
+  const col = TEAMS[c.team] ? TEAMS[c.team].css : '#fff';
+  bigMsg.innerHTML = `<div class="big-goal">⚽ GOAL!</div><div class="big-sub" style="color:${col}">${who}</div>${assist}`;
+}
+function hideBigMsg() { bigMsg.classList.add('hidden'); bigMsg.innerHTML = ''; }
+
 function onGoal(scoringSide) {
-  // Ball in the +X goal (side +1) => you/fish team scored (right).
+  // Ball in the +X goal (side +1) => right team scored.
   if (scoringSide > 0) state.scoreR++; else state.scoreL++;
   playGoalSound();
   flashGoal();
+
+  // ใครยิง / assist — จากผู้สัมผัสบอลล่าสุด
+  const scorer = ball.lastTouch;
+  let own = false, assistName = null, name = 'ใครสักคน';
+  if (scorer) {
+    name = scorer.name;
+    const scorerAttack = TEAMS[scorer.team] ? TEAMS[scorer.team].attackSide : 1;
+    own = scorerAttack !== scoringSide;   // เตะเข้าประตูที่ตัวเองป้องกัน = own goal
+    if (!own) {
+      scorer.stats.goals++;
+      const a = ball.prevTouch;
+      if (a && a !== scorer && a.team === scorer.team) { a.stats.assists++; assistName = a.name; }
+    }
+  }
+  state.celebrate = { name, team: scorer ? scorer.team : 'red', assist: assistName, own };
+  state.phase = 'celebrate';
+  state.timer = 1.8;                       // โชว์ข้อความ 1.8 วิ ก่อนนับถอยหลัง
+  showGoalMsg(state.celebrate);
   updateHUD();
-  state.goalCooldown = 1.2;
-  setTimeout(() => {
-    if (state.playing) { resetBall(); resetPlayers(); resetRonaldo(); }
-  }, 1200);
 }
 
 let goalFlash = 0;
@@ -1370,7 +1425,7 @@ function stepBall(dt) {
 
     // นับแต้มเมื่อบอลเข้าไปในประตูชัด ๆ (พ้นเส้นเข้าไป ~0.5)
     const deepInside = g.side > 0 ? ball.pos.x > g.lineX + 0.5 : ball.pos.x < g.lineX - 0.5;
-    if (deepInside && state.goalCooldown <= 0) onGoal(g.side);
+    if (deepInside && state.phase === 'live') onGoal(g.side);
 
     // ตาข่ายหลัง — หยุดบอลไม่ให้ทะลุ
     if (g.side > 0) { if (ball.pos.x > g.backX - B.radius) { ball.pos.x = g.backX - B.radius; ball.vel.x = -Math.abs(ball.vel.x) * 0.25; } }
@@ -1411,12 +1466,14 @@ function stepBall(dt) {
 
 // Fish <-> ball collision: a fish's body shoves the ball.
 function collideFishBall(p) {
+  if (p.shotCd > 0) p.shotCd -= 1 / 60;
   const dx = ball.pos.x - p.pos.x;
   const dz = ball.pos.z - p.pos.z;
   const dy = ball.pos.y - p.pos.y;
   const distXZ = Math.hypot(dx, dz);
   const contactR = CONFIG.ball.radius + 1.3; // fish body reach
   if (distXZ < contactR && Math.abs(dy) < 1.6) {
+    const preVx = ball.vel.x;                     // ทิศบอลก่อนโดนเตะ (ไว้ตรวจ block)
     const n = new THREE.Vector3(dx, 0, dz);
     if (n.lengthSq() < 1e-4) n.set(Math.sin(p.heading), 0, Math.cos(p.heading));
     n.normalize();
@@ -1428,6 +1485,22 @@ function collideFishBall(p) {
     const overlap = contactR - distXZ;
     ball.pos.x += n.x * overlap;
     ball.pos.z += n.z * overlap;
+
+    // ---------- สถิติ ----------
+    const attack = TEAMS[p.team] ? TEAMS[p.team].attackSide : 1;   // +1 = ยิงขวา, -1 = ยิงซ้าย
+    // ผู้สัมผัสบอลล่าสุด (ไว้หาคนยิง/assist)
+    if (ball.lastTouch !== p) { ball.prevTouch = ball.lastTouch; ball.lastTouch = p; }
+    // Block: บอลกำลังพุ่งเข้าประตูตัวเอง (สวนทิศบุก) ในแดนรับ แล้วถูกเตะกลับ
+    const ownGoalDir = -attack;                    // ทิศไปประตูตัวเอง
+    const wasTowardOwn = preVx * ownGoalDir > 2;   // พุ่งเข้าประตูตัวเองแรงพอ
+    const inOwnHalf = p.pos.x * ownGoalDir > 4;    // อยู่ครึ่งสนามฝั่งตัวเอง
+    const nowAway = ball.vel.x * attack > 1;       // เตะกลับออกไปแล้ว
+    if (wasTowardOwn && inOwnHalf && nowAway && p.shotCd <= 0) {
+      p.stats.blocks++; p.shotCd = 0.5;
+    } else if (ball.vel.x * attack > 6 && p.shotCd <= 0) {
+      // Shot: เตะบอลไปทางประตูคู่แข่งแรง ๆ
+      p.stats.shots++; p.shotCd = 0.4;
+    }
   }
 }
 
@@ -1511,19 +1584,27 @@ function buildWorld() {
   }
   return {
     ball: [r2(ball.pos.x), r2(ball.pos.y), r2(ball.pos.z)], bots,
-    scoreL: state.scoreL, scoreR: state.scoreR,
-    timeLeft: Math.max(0, state.timeLeft), playing: state.playing,
+    scoreL: state.scoreL, scoreR: state.scoreR, goalTarget: state.goalTarget,
+    phase: state.phase,
+    cd: state.phase === 'kickoff' ? Math.max(0, Math.ceil(state.timer)) : 0,
+    cel: state.phase === 'celebrate' ? state.celebrate : null,
+    playing: state.playing,
   };
 }
-// client อ่านสภาพโลกจาก host มาใช้ (ลูกบอล + คะแนน + เวลา)
+// client อ่านสภาพโลกจาก host มาใช้ (ลูกบอล + คะแนน + phase/ข้อความ)
 function applyWorld(dt) {
   const w = net.world; if (!w) return;
   if (w.ball) ball.pos.lerp(_netTmp.set(w.ball[0], w.ball[1], w.ball[2]), Math.min(1, dt * 12));
   if (w.scoreR > state.scoreR || w.scoreL > state.scoreL) { playGoalSound(); flashGoal(); }
   state.scoreL = w.scoreL || 0; state.scoreR = w.scoreR || 0;
-  if (w.timeLeft != null) state.timeLeft = w.timeLeft;
+  if (w.goalTarget) state.goalTarget = w.goalTarget;
+  state.phase = w.phase || 'live';
+  // ข้อความกลางจอตาม phase ของ host
+  if (state.phase === 'kickoff') showCountdown(w.cd || 0);
+  else if (state.phase === 'celebrate' && w.cel) showGoalMsg(w.cel);
+  else hideBigMsg();
   updateHUD();
-  if (w.playing === false || state.timeLeft <= 0) endMatch();
+  if (w.playing === false) endMatch();
 }
 
 function tick() {
@@ -1534,22 +1615,35 @@ function tick() {
   if (state.playing) {
     const online = net.active;
     if (!online || net.isHost) {
-      // ออฟไลน์ หรือ host: จำลองทุกอย่าง (ยกเว้นปลาคนอื่นที่อ่านจากเน็ต)
-      for (const p of players) {
-        if (p.isRemote) { applyNetTo(p, net.players[p.id]); lerpToNet(p, dt); }
-        else { controlPlayer(p, dt); stepFish(p, dt); }
+      // ออฟไลน์ หรือ host: เดินเกมตาม phase
+      const lerpRemotes = () => { for (const p of players) if (p.isRemote) { applyNetTo(p, net.players[p.id]); lerpToNet(p, dt); } };
+      if (state.phase === 'kickoff') {
+        state.timer -= dt;
+        if (state.timer > 0) showCountdown(Math.ceil(state.timer)); else showCountdown(0);
+        if (state.timer <= -0.5) { state.phase = 'live'; hideBigMsg(); }
+        lerpRemotes();
+      } else if (state.phase === 'celebrate') {
+        state.timer -= dt;
+        lerpRemotes();
+        if (state.timer <= 0) {
+          if (state.scoreL + state.scoreR >= state.goalTarget) { endMatch(); }
+          else { resetBall(); resetPlayers(); resetRonaldo(); state.phase = 'kickoff'; state.timer = 3; showCountdown(3); }
+        }
+      } else { // live
+        for (const p of players) {
+          if (p.isRemote) { applyNetTo(p, net.players[p.id]); lerpToNet(p, dt); }
+          else { controlPlayer(p, dt); stepFish(p, dt); }
+        }
+        stepRonaldo(dt);
+        stepBall(dt);
+        for (const p of players) collideFishBall(p);
       }
-      stepRonaldo(dt);
-      stepBall(dt);
-      for (const p of players) collideFishBall(p);
-      if (state.goalCooldown > 0) state.goalCooldown -= dt;
-      state.timeLeft -= dt;
-      if (state.timeLeft <= 0) { state.timeLeft = 0; updateHUD(); endMatch(); }
-      else updateHUD();
+      updateHUD();
     } else {
-      // client: คุมปลาตัวเอง อ่านที่เหลือจากเน็ต
+      // client: คุมปลาตัวเองเฉพาะตอน live อ่านที่เหลือจากเน็ต
+      const wphase = (net.world && net.world.phase) || 'live';
       for (const p of players) {
-        if (p.isLocal) { controlPlayer(p, dt); stepFish(p, dt); }
+        if (p.isLocal) { if (wphase === 'live') { controlPlayer(p, dt); stepFish(p, dt); } }
         else if (p.isRemote) { applyNetTo(p, net.players[p.id]); lerpToNet(p, dt); }
         else if (p.isBot) { applyNetTo(p, net.world && net.world.bots && net.world.bots[p.id]); lerpToNet(p, dt); }
       }
@@ -1689,7 +1783,7 @@ wireSeg('modeSeg', 'mode', (v) => {
   settings.mode = v;
   document.getElementById('diffGroup').style.display = v === 'coop' ? '' : 'none';
 });
-wireSeg('timeSeg', 'sec', (v) => { settings.matchSeconds = parseInt(v, 10); });
+wireSeg('goalSeg', 'goals', (v) => { settings.goalTarget = parseInt(v, 10); });
 wireSeg('diffSeg', 'diff', (v) => { settings.difficulty = v; });
 // Host: settings → lobby (to pick a slot) → start
 document.getElementById('startGameBtn').addEventListener('click', () => openLobby(true));
@@ -1741,7 +1835,7 @@ async function openLobby(isHost) {
   // ต่อเข้าห้อง Firebase
   if (isHost) {
     const meta = {
-      mode: settings.mode, sec: settings.matchSeconds, diff: settings.difficulty,
+      mode: settings.mode, goals: settings.goalTarget, diff: settings.difficulty,
       slotState: settings.slotState, hostSlot: 0, started: false,
     };
     await connectRoom({ code: settings.roomCode, isHost: true, slot: 0, meta, presence: presenceFor(0) });
@@ -1760,7 +1854,7 @@ function syncLobbyFromNet() {
   // joiner รับโหมด/ตั้งค่าจาก host
   if (!net.isHost && net.meta) {
     settings.mode = net.meta.mode || settings.mode;
-    settings.matchSeconds = net.meta.sec || settings.matchSeconds;
+    settings.goalTarget = net.meta.goals || settings.goalTarget;
     settings.difficulty = net.meta.diff || settings.difficulty;
     const count = MODE_SLOTS[settings.mode];
     settings.slotState = (net.meta.slotState && net.meta.slotState.slice(0, count)) || Array(count).fill('bot');

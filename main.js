@@ -648,7 +648,7 @@ const ball = {
 // ลูกฟุตบอลลายขาว-ดำแบบ procedural (ไม่ต้องพึ่ง texture)
 // ใช้ทรงอิโคซาฮีดรอน แล้วทาสีดำที่หน้าใกล้ 12 มุม (เป็นห้าเหลี่ยม) ที่เหลือขาว
 function buildSoccerBall(radius) {
-  const geo = new THREE.IcosahedronGeometry(radius, 6);   // ละเอียดขึ้น → กลม ไม่เหลี่ยม
+  const geo = new THREE.IcosahedronGeometry(radius, 10);  // ละเอียดสูงสุด → กลมที่สุด
   geo.computeVertexNormals();
   const t = (1 + Math.sqrt(5)) / 2;
   const verts = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t],
@@ -929,11 +929,16 @@ window.addEventListener('keydown', (e) => {
   if (k === 'escape') goToMenu();
   if (k === 'f') toggleFullscreen();
   keys.add(k);
+  // ผูกกับ "ปุ่มจริง" ด้วย → หันซ้าย/ขวาได้แม้พิมพ์ไทย (A=ฤ, D=ฏ ฯลฯ)
+  if (e.code === 'KeyA') keys.add('a');
+  if (e.code === 'KeyD') keys.add('d');
 });
 window.addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
   if (k === ' ' && localPlayer) { doFlop(localPlayer); localPlayer.charging = false; }
   keys.delete(k);
+  if (e.code === 'KeyA') keys.delete('a');
+  if (e.code === 'KeyD') keys.delete('d');
 });
 // Pointer = quick flop (mobile / lazy)
 renderer.domElement.addEventListener('pointerdown', () => { if (localPlayer) localPlayer.charging = true; });
@@ -1816,7 +1821,7 @@ function presenceFor(slot) {
 async function openLobby(isHost) {
   settings.slot = 0;
   let count = MODE_SLOTS[settings.mode];
-  settings.slotState = Array(count).fill('bot');   // default: fill others with bots
+  settings.slotState = Array(count).fill('empty');   // เริ่มห้องโล่ง ๆ (ค่อยกด ＋ เพิ่มบอทเอง)
 
   const online = netAvailable();
   if (online && !isHost) settings.slot = -1;   // joiner ยังไม่เลือกช่อง
@@ -1857,7 +1862,7 @@ function syncLobbyFromNet() {
     settings.goalTarget = net.meta.goals || settings.goalTarget;
     settings.difficulty = net.meta.diff || settings.difficulty;
     const count = MODE_SLOTS[settings.mode];
-    settings.slotState = (net.meta.slotState && net.meta.slotState.slice(0, count)) || Array(count).fill('bot');
+    settings.slotState = (net.meta.slotState && net.meta.slotState.slice(0, count)) || Array(count).fill('empty');
     document.getElementById('lobbyTag').textContent = settings.mode === 'coop' ? '🤝 ร่วมมือกัน' : '⚔️ แข่งกันเอง';
   }
   buildLobby();
@@ -1971,7 +1976,7 @@ window.__debug = {
   ball, ronaldo, state, settings, goals, CONFIG, FISH_ROSTER, TEAMS,
   stepFish, stepRonaldo, stepBall, collideFishBall, doFlop, onGoal,
   resetBall, resetPlayers, resetRonaldo, startMatch, setFish, spawnPlayers,
-  showScreen, toggleFullscreen, buildLobby,
+  showScreen, toggleFullscreen, buildLobby, keys, controlPlayer,
   playBreath, get breathCount() { return breathBuffers.filter(Boolean).length; },
   renderer, scene, camera, animateFish, animateHuman, updateCamera,
 };

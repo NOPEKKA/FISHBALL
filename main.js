@@ -733,7 +733,7 @@ const TEAMS = {
   fish: { label: 'ทีมปลา', color: 0x39d353, css: '#39d353', homeX: -8, attackSide: +1 },
 };
 // Slots per mode (how many fish are on the field)
-const MODE_SLOTS = { versus: 6, coop: 3 };
+const MODE_SLOTS = { versus: 6, coop: 6 };
 
 let players = [];
 let localPlayer = null;
@@ -1065,14 +1065,15 @@ async function loadBreathSounds() {
     } catch (e) { /* siuu optional */ }
   } catch (e) { /* audio optional */ }
 }
-// เสียง SIUUU ตอน Ronaldo ยิงเข้า
+// เสียง SIUUU ตอน Ronaldo ยิงเข้า — เล่นเฉพาะ 2 วินาทีสุดท้ายของคลิป (ตอนตะโกน)
 function playSiuu() {
   if (!audioCtx || !siuuBuffer) return;
   if (audioCtx.state === 'suspended') audioCtx.resume();
   const src = audioCtx.createBufferSource(); src.buffer = siuuBuffer;
-  const gain = audioCtx.createGain(); gain.gain.value = 0.9;
+  const gain = audioCtx.createGain(); gain.gain.value = 0.95;
   src.connect(gain).connect(audioOut());
-  src.start();
+  const offset = Math.max(0, siuuBuffer.duration - 2);
+  src.start(0, offset);
 }
 // Play one random breath clip, panned by the fish's field position.
 function playBreath(p) {
@@ -1667,6 +1668,8 @@ function buildWorld() {
     phase: state.phase,
     cd: state.phase === 'kickoff' ? Math.max(0, Math.ceil(state.timer)) : 0,
     cel: state.phase === 'celebrate' ? state.celebrate : null,
+    // Ronaldo (co-op) — sync ตำแหน่ง/เดิน ให้ client เห็นด้วย
+    ron: ronaldo.active ? { pos: [r2(ronaldo.pos.x), r2(ronaldo.pos.y), r2(ronaldo.pos.z)], h: +ronaldo.heading.toFixed(3), mv: +(ronaldo.moving || 0).toFixed(2), wp: +(ronaldo.walkPhase || 0).toFixed(2) } : null,
     playing: state.playing,
   };
 }
@@ -1678,6 +1681,16 @@ function applyWorld(dt) {
   state.scoreL = w.scoreL || 0; state.scoreR = w.scoreR || 0;
   if (w.goalTarget) state.goalTarget = w.goalTarget;
   state.phase = w.phase || 'live';
+  // Ronaldo sync (co-op) — วางตำแหน่ง/เดิน ให้ตรงกับ host
+  if (w.ron) {
+    ronaldo.active = true;
+    ronaldo.pos.set(w.ron.pos[0], w.ron.pos[1], w.ron.pos[2]);
+    ronaldo.heading = w.ron.h; ronaldo.moving = w.ron.mv || 0; ronaldo.walkPhase = w.ron.wp || 0;
+  } else if (state.mode !== 'coop') { ronaldo.active = false; }
+  // คัตซีน SIUUU ของ Ronaldo — ให้ client เห็น+ได้ยินด้วย
+  const ronCel = state.phase === 'celebrate' && w.cel && w.cel.ronaldo;
+  if (ronCel && !state.cutscene) { state.cutscene = true; ronaldo.siuu = { t: 0 }; playSiuu(); }
+  if (!ronCel && state.cutscene) { state.cutscene = false; ronaldo.siuu = null; }
   // ข้อความกลางจอตาม phase ของ host
   if (state.phase === 'kickoff') showCountdown(w.cd || 0);
   else if (state.phase === 'celebrate' && w.cel) showGoalMsg(w.cel);
@@ -1999,11 +2012,14 @@ function buildLobby() {
   };
 
   if (settings.mode === 'coop') {
-    const col = document.createElement('div'); col.className = 'team-col';
-    const head = document.createElement('div'); head.className = 'team-head fish';
-    head.textContent = '🐟 ทีมปลา (สู้ Ronaldo)'; col.appendChild(head);
-    for (let i = 0; i < 3; i++) col.appendChild(mkSlot(i, 'fish', 'บอท ' + (i + 1)));
-    body.appendChild(col);
+    // ทีมปลา 6 คน สู้ Ronaldo — แบ่ง 2 คอลัมน์ คอลัมน์ละ 3
+    [[0, '🐟 ทีมปลา (สู้ Ronaldo)'], [3, '🐟 ทีมปลา']].forEach(([base, title]) => {
+      const col = document.createElement('div'); col.className = 'team-col';
+      const head = document.createElement('div'); head.className = 'team-head fish';
+      head.textContent = title; col.appendChild(head);
+      for (let i = 0; i < 3; i++) col.appendChild(mkSlot(base + i, 'fish', 'บอท ' + (base + i + 1)));
+      body.appendChild(col);
+    });
   } else {
     const teams = [['red', '🔴 ฝั่งแดง (ซ้าย)', 0], ['blue', '🔵 ฝั่งน้ำเงิน (ขวา)', 3]];
     teams.forEach(([team, title, base]) => {

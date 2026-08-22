@@ -1784,7 +1784,10 @@ async function boot() {
 // ---------- Menu / screen navigation ----------
 function goToMenu() {
   state.playing = false;
+  state.phase = 'live';
+  state.cutscene = false; state.celebrate = null; ronaldo.siuu = null;
   ronaldo.active = false;
+  hideBigMsg();                  // เก็บข้อความ/คัตซีน SIUUU ที่ค้าง
   if (net.active) leaveRoom();   // ออกจากห้องออนไลน์
   showScreen('title');
 }
